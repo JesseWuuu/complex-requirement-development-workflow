@@ -1,0 +1,4 @@
+interface:
+  display_name: "复杂需求研发工作流"
+  short_description: "以最小真实改动规划复杂需求并生成规格、测试与实施文档"
+  default_prompt: "使用 $complex-requirement-development-workflow 基于产品与仓库依据做只读实施演练，只将已批准契约写入 Spec 和测试，并以最小真实 Diff 生成实施文档；按检查点确认并在最终授权后实现。"

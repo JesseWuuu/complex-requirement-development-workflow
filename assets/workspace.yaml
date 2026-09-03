@@ -1,0 +1,25 @@
+schema: requirement-workspace/v1
+workspace_slug: "<workspace-slug>"
+repo_root: "<git-root>"
+delivery_dir: "<spec-root>/<workspace-slug>"
+workflow_dir: "<spec-root>/.workflow/<workspace-slug>"
+execution_mode: strict_serial
+active_module: null
+active_owner: null
+active_since: null
+
+prd:
+  path: "<spec-root>/<workspace-slug>/prd.md"
+
+members: []
+# Each member uses:
+# - module_slug: "<module-slug>"
+#   sequence: 1
+#   delivery_dir: "<module-delivery-dir>"
+#   state_path: "<module-state-path>"
+#   status: queued  # complete only after verified implementation and terminal read-only code review
+#   activated_at: null
+#   completed_at: null
+#   last_owner: null
+
+next_action: "登记或激活第一个模块"

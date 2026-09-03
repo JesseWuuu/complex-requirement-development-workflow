@@ -1,0 +1,13 @@
+.DS_Store
+.obsidian/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+.venv/
+venv/
+.idea/
+.vscode/

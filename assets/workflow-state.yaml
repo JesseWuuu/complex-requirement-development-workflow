@@ -1,0 +1,108 @@
+schema: requirement-spec/v2
+feature_slug: "<feature-slug>"
+repo_root: "<git-root>"
+delivery_dir: "<spec-root>/<feature-slug>"
+workflow_dir: "<spec-root>/.workflow/<feature-slug>"
+
+workspace:
+  workspace_path: null
+  module_slug: null
+
+inputs:
+  prd:
+    path: "<spec-root>/<feature-slug>/prd.md"
+    sha256: null
+  project_rules: []
+  design_targets: []
+
+current_phase: 1
+status: in_progress
+next_action: "界定问题与方案方向"
+open_blockers: []
+
+recovery:
+  migrated_from_tasks: []
+
+direction:
+  # Spec 批准后改为 superseded；不创建单独的方向文件。
+  status: not_started
+  summary: null
+  approved_at: null
+  approval_note: null
+
+artifacts:
+  spec:
+    status: not_started
+    path: "<spec-root>/<feature-slug>/spec.md"
+    sha256: null
+    approved_at: null
+    approval_note: null
+  test:
+    status: not_started
+    path: "<spec-root>/<feature-slug>/test.md"
+    sha256: null
+    approved_at: null
+    approval_note: null
+  implementation:
+    status: not_started
+    path: "<spec-root>/<feature-slug>/implementation.md"
+    sha256: null
+    approved_at: null
+    approval_note: null
+
+repo_grounding:
+  status: not_started
+  checked_at: null
+  fingerprint_sha256: null
+  evidence_pack:
+    path: null
+    sha256: null
+    input_fingerprint_sha256: null
+  relevant_targets: []
+
+# 三份已批准文档摘要与技术依据指纹的唯一聚合值。
+plan_fingerprint_sha256: null
+
+consistency_review:
+  status: not_started
+  plan_fingerprint_sha256: null
+  reviewer_ref: null
+  attempt: 0
+  outcome: null
+  conclusion: null
+  conclusion_sha256: null
+  completed_at: null
+  revision_decision:
+    status: not_required
+    return_phase: null
+    artifacts: []
+    review_conclusion_sha256: null
+    decided_at: null
+    decision_note: null
+
+implementation_authorization:
+  status: not_granted
+  plan_fingerprint_sha256: null
+  granted_at: null
+  approval_note: null
+
+implementation_result:
+  status: not_started
+  plan_fingerprint_sha256: null
+  output_manifest_complete: false
+  output_fingerprint_sha256: null
+  changes: []
+  # changes item: {path, kind: present | removed, role, sha256}
+  verification: []
+  # verification item: {check, result: passed | failed | blocked, evidence}
+  completed_at: null
+
+post_implementation_review:
+  status: not_started
+  input_fingerprint_sha256: null
+  reviewer_ref: null
+  attempt: 0
+  outcome: null
+  conclusion: null
+  conclusion_sha256: null
+  completed_at: null
