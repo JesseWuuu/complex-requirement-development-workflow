@@ -447,6 +447,109 @@ class ResumeStateCheckTest(unittest.TestCase):
         self.assertEqual(1, completed.returncode)
         self.assertIn("implementation_result", {item["kind"] for item in result["errors"]})
 
+    def test_failed_or_blocked_checks_allow_terminal_review_to_start(self) -> None:
+        """Code completion permits review even when no verification could pass."""
+        for outcomes in (["failed"], ["blocked"], ["passed", "failed", "blocked"]):
+            with self.subTest(outcomes=outcomes):
+                self.approve_planning()
+                self.verify_implementation()
+                implementation = self.state["implementation_result"]
+                implementation["status"] = "implemented"
+                implementation["verification"] = [
+                    {"check": f"check {index}", "result": outcome, "evidence": f"recorded {outcome}"}
+                    for index, outcome in enumerate(outcomes)
+                ]
+                self.complete_post_review()
+                self.state["status"] = "in_progress"
+                review = self.state["post_implementation_review"]
+                review.update(status="in_progress", outcome=None, conclusion=None, conclusion_sha256=None, completed_at=None)
+                completed, result = self.run_check()
+                self.assertEqual(0, completed.returncode, result)
+                self.assertEqual("fast_path", result["resume_mode"])
+                saved = yaml.safe_load(self.state_path.read_text(encoding="utf-8"))
+                self.assertEqual(implementation["verification"], saved["implementation_result"]["verification"])
+
+    def test_review_completion_closes_workflow_with_unresolved_verification(self) -> None:
+        """Both review outcomes may close the workflow while failed checks stay recorded."""
+        for outcome in ("no_findings", "findings"):
+            with self.subTest(outcome=outcome):
+                self.approve_planning()
+                self.verify_implementation()
+                implementation = self.state["implementation_result"]
+                implementation["status"] = "implemented"
+                implementation["verification"] = [
+                    {"check": "build", "result": "failed", "evidence": "compiler error"},
+                    {"check": "device", "result": "blocked", "evidence": "test account unavailable"},
+                ]
+                self.complete_post_review(outcome=outcome)
+                completed, result = self.run_check()
+                self.assertEqual(0, completed.returncode, result)
+                self.assertTrue(result["ok"])
+                self.assertEqual("implemented", implementation["status"])
+                self.assertEqual(["failed", "blocked"], [item["result"] for item in implementation["verification"]])
+
+    def test_verified_cannot_conceal_failed_or_blocked_checks(self) -> None:
+        """Relaxing the review gate must not relabel unverified results as passed."""
+        for outcome in ("failed", "blocked"):
+            with self.subTest(outcome=outcome):
+                self.approve_planning()
+                self.verify_implementation()
+                self.state["implementation_result"]["verification"][0]["result"] = outcome
+                completed, result = self.run_check()
+                self.assertEqual(1, completed.returncode, result)
+                self.assertIn("verification", {item["kind"] for item in result["errors"]})
+
+    def test_implemented_still_requires_complete_recorded_output_and_checks(self) -> None:
+        """Failures can be reported, but missing implementation evidence cannot be skipped."""
+        for field, value, kind, exit_code in (
+            ("output_manifest_complete", False, "implementation_result", 1),
+            ("output_fingerprint_sha256", "0" * 64, "output_fingerprint", 1),
+            ("verification", [], "verification", 1),
+            ("completed_at", None, "implementation_result", 2),
+        ):
+            with self.subTest(field=field):
+                self.approve_planning()
+                self.verify_implementation()
+                self.state["implementation_result"].update(status="implemented", **{field: value})
+                completed, result = self.run_check()
+                self.assertEqual(exit_code, completed.returncode, result)
+                self.assertIn(kind, {item["kind"] for item in result["errors"]})
+
+    def test_unfinished_implementation_cannot_skip_to_terminal_review(self) -> None:
+        """Only verification problems are non-blocking; unfinished code is not review-ready."""
+        self.approve_planning()
+        self.verify_implementation()
+        self.state["implementation_result"]["status"] = "in_progress"
+        self.complete_post_review()
+        completed, result = self.run_check()
+        self.assertEqual(1, completed.returncode)
+        kinds = {item["kind"] for item in result["errors"]}
+        self.assertIn("post_implementation_review_binding", kinds)
+        self.assertIn("workflow_complete", kinds)
+
+    def test_implemented_review_remains_bound_to_code_authorization_and_verification(self) -> None:
+        """Recorded failures do not weaken approval, output drift, or review fingerprint checks."""
+        for changed in ("authorization", "code", "verification"):
+            with self.subTest(changed=changed):
+                self.approve_planning()
+                self.verify_implementation()
+                implementation = self.state["implementation_result"]
+                implementation["status"] = "implemented"
+                implementation["verification"][0]["result"] = "blocked"
+                self.complete_post_review()
+                if changed == "authorization":
+                    self.state["implementation_authorization"]["status"] = "invalidated"
+                    expected_kind = "implementation_result"
+                elif changed == "code":
+                    self.write(self.target, "changed after review\n")
+                    expected_kind = "implementation_change"
+                else:
+                    implementation["verification"][0]["evidence"] = "different missing condition"
+                    expected_kind = "post_implementation_review_binding"
+                completed, result = self.run_check()
+                self.assertEqual(1, completed.returncode, result)
+                self.assertIn(expected_kind, {item["kind"] for item in result["errors"] + result["drift"]})
+
     def test_rejects_terminal_review_after_verification_changes(self) -> None:
         self.approve_planning()
         self.verify_implementation()

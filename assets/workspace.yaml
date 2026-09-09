@@ -17,7 +17,7 @@ members: []
 #   sequence: 1
 #   delivery_dir: "<module-delivery-dir>"
 #   state_path: "<module-state-path>"
-#   status: queued  # complete only after verified implementation and terminal read-only code review
+#   status: queued  # complete after code implementation, recorded verification results, and terminal read-only review
 #   activated_at: null
 #   completed_at: null
 #   last_owner: null

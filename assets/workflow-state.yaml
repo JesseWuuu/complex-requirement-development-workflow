@@ -87,14 +87,19 @@ implementation_authorization:
   approval_note: null
 
 implementation_result:
+  # not_started | in_progress | implemented | verified | invalidated
+  # implemented：代码完成、全部验证项已记录，允许 failed/blocked；verified：所有验证项均 passed。
+  # 两者均可进入终结代码审阅；均须有完整输出清单、输出指纹、验证记录和 completed_at。
   status: not_started
   plan_fingerprint_sha256: null
   output_manifest_complete: false
   output_fingerprint_sha256: null
   changes: []
   # changes item: {path, kind: present | removed, role, sha256}
+  # 包含必要实现补充；role 关联 I-* 与职责，不因此改写原规划或批准指纹。
   verification: []
   # verification item: {check, result: passed | failed | blocked, evidence}
+  # 必要补充的依据、影响与验证记入 check/evidence；失败记 failed，条件不足记 blocked，不阻止终结审阅。
   completed_at: null
 
 post_implementation_review:

@@ -18,6 +18,7 @@ SHA256_LENGTH = 64
 ARTIFACT_PHASES = {"spec": 3, "test": 4, "implementation": 5}
 ARTIFACT_STATUSES = {"not_started", "awaiting_approval", "approved", "reopened"}
 TOP_STATUSES = {"in_progress", "awaiting_approval", "blocked", "complete", "invalidated"}
+COMPLETED_IMPLEMENTATION_STATUSES = {"implemented", "verified"}
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -288,7 +289,7 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
         add_issue(structural, kind="implementation_authorization", phase=7, reason="implementation authorization status is invalid")
 
     result_status = implementation_result.get("status")
-    if result_status not in {"not_started", "in_progress", "verified", "invalidated"}:
+    if result_status not in {"not_started", "in_progress", "invalidated", *COMPLETED_IMPLEMENTATION_STATUSES}:
         add_issue(structural, kind="implementation_result", phase=7, reason="implementation result status is invalid")
 
     grounding = state.get("repo_grounding")
@@ -319,7 +320,7 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
         expected_output = change_by_path.get(path)
         output_is_authorized = (
             authorization_status == "granted"
-            and result_status in {"in_progress", "verified"}
+            and result_status in {"in_progress", *COMPLETED_IMPLEMENTATION_STATUSES}
             and authorization.get("plan_fingerprint_sha256")
             == state.get("plan_fingerprint_sha256")
             and implementation_result.get("plan_fingerprint_sha256")
@@ -448,7 +449,7 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
 
     computed_output = sha256_text("\n".join(sorted(output_lines))) if output_lines else None
     stored_output = implementation_result.get("output_fingerprint_sha256")
-    if result_status in {"in_progress", "verified"}:
+    if result_status in {"in_progress", *COMPLETED_IMPLEMENTATION_STATUSES}:
         if authorization_status != "granted" or expected_plan is None or implementation_result.get("plan_fingerprint_sha256") != expected_plan:
             add_issue(errors, kind="implementation_result", phase=7, reason="implementation result is not bound to an active authorization and current plan")
         for path, change in change_by_path.items():
@@ -458,18 +459,20 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
                 add_issue(drift, kind="implementation_change", phase=7, reason="registered output changed", path=str(path), expected=expected_sha, actual=actual or "missing")
             if change.get("kind") == "removed" and actual is not None:
                 add_issue(drift, kind="implementation_change", phase=7, reason="registered removed output exists again", path=str(path), expected="missing", actual=actual)
-    if result_status == "verified":
+    if result_status in COMPLETED_IMPLEMENTATION_STATUSES:
         if implementation_result.get("output_manifest_complete") is not True or not changes:
-            add_issue(errors, kind="implementation_result", phase=7, reason="verified result needs a complete non-empty change manifest")
+            add_issue(errors, kind="implementation_result", phase=7, reason="completed implementation needs a complete non-empty change manifest")
         if computed_output is None or stored_output != computed_output:
             add_issue(errors, kind="output_fingerprint", phase=7, reason="output fingerprint does not match registered changes", expected=computed_output, actual=stored_output)
-        if not verification or any(item.get("result") != "passed" for item in verification if isinstance(item, dict)):
-            add_issue(errors, kind="verification", phase=7, reason="verified result needs at least one passed verification and no failures")
+        if not verification:
+            add_issue(errors, kind="verification", phase=7, reason="completed implementation needs recorded verification results")
+        if result_status == "verified" and any(item.get("result") != "passed" for item in verification if isinstance(item, dict)):
+            add_issue(errors, kind="verification", phase=7, reason="verified result requires every verification to be passed; use implemented for failed or blocked checks")
         if not is_nonempty_string(implementation_result.get("completed_at")):
-            add_issue(structural, kind="implementation_result", phase=7, reason="verified result needs completed_at")
+            add_issue(structural, kind="implementation_result", phase=7, reason="completed implementation needs completed_at")
 
     expected_post_input: str | None = None
-    if result_status == "verified" and expected_plan is not None and is_sha256(stored_output):
+    if result_status in COMPLETED_IMPLEMENTATION_STATUSES and expected_plan is not None and is_sha256(stored_output):
         expected_post_input = canonical_sha256(
             {"output": stored_output, "plan": expected_plan, "verification": verification}
         )
@@ -493,8 +496,8 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
         errors=errors,
     )
 
-    if state.get("status") == "complete" and (result_status != "verified" or post_status != "completed"):
-        add_issue(errors, kind="workflow_complete", phase=7, reason="complete workflow requires verified implementation and completed terminal review")
+    if state.get("status") == "complete" and (result_status not in COMPLETED_IMPLEMENTATION_STATUSES or post_status != "completed"):
+        add_issue(errors, kind="workflow_complete", phase=7, reason="complete workflow requires completed implementation and completed terminal review; verification may contain failed or blocked checks")
     if post_status == "completed" and state.get("status") != "complete":
         add_issue(errors, kind="workflow_complete", phase=7, reason="completed terminal review must close the workflow")
 
