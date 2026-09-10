@@ -61,7 +61,7 @@ $complex-requirement-development-workflow
 
 阶段产出以 `需求代号 · 阶段 N/7 · 名称 · 状态` 开头，普通需求代号就是交付目录名。首次阶段产出会保存精简检查点（默认位于 `docs/spec/.workflow/`），后续对话可以直接说 `继续 <需求代号>`；无法唯一定位时再补充项目或完整路径。多模块使用 `需求代号/模块代号`，严格串行，同一时刻只有一个模块可以处于实施流程中。
 
-能读取当前对话可靠的上下文窗口统计时，每次阶段输出末尾附上 `上下文窗口已使用：约 P%（最近一次运行时统计）`；读取不到时省略，不用账户额度或估算值替代。
+运行时直接提供当前对话可靠的上下文窗口统计时，可在阶段输出末尾展示；否则省略。
 
 ## 目录结构
 
@@ -71,8 +71,10 @@ $complex-requirement-development-workflow
 ├── agents/openai.yaml       # Codex UI 元数据
 ├── assets/                  # 检查点、工作区与技术依据模板
 ├── references/              # 按阶段加载的详细规则
-└── scripts/                 # 状态校验与串行工作区门禁
+└── scripts/                 # 只读状态校验与串行工作区门禁，以及对应测试
 ```
+
+只保留两类脚本辅助：`check_resume_state.py --context <state.yaml>` 校验并返回当前阶段输入，需要计算摘要时加 `--fingerprints`；`assert_serial_workspace.py` 仅用于多模块工作区的原子抢占、校验和释放。状态由主 Agent 按事实直接编辑，操作见 [续接参考](references/cross-conversation-resumption.md#更新与校验)。批准、返修和阶段推进由 Skill 规则负责，同一对话内复用未变化且仍可用的材料。
 
 ## 验证
 

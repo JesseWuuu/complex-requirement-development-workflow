@@ -211,18 +211,28 @@ def check_module_state_complete(target: dict[str, Any], workspace_path: Path) ->
 
 
 def apply_action(args: argparse.Namespace, workspace_path: Path) -> tuple[int, dict[str, Any]]:
+    workspace = None
+    target = None
+
+    def finish(
+        code: int = 0, errors: list[str] | None = None, *, changed: bool = False
+    ) -> tuple[int, dict[str, Any]]:
+        return code, result_payload(
+            ok=code == 0,
+            action=args.action,
+            module=args.module,
+            workspace=workspace,
+            target=target,
+            changed=changed,
+            errors=errors,
+        )
+
     owner = None
     if args.action in {"claim", "check", "complete"}:
         try:
             owner = ensure_owner(args.owner)
         except ValueError as exc:
-            return 2, result_payload(
-                ok=False,
-                action=args.action,
-                module=args.module,
-                workspace=None,
-                errors=[str(exc)],
-            )
+            return finish(2, [str(exc)])
 
     lock_path = workspace_path.with_name(f".{workspace_path.name}.gate.lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,13 +241,7 @@ def apply_action(args: argparse.Namespace, workspace_path: Path) -> tuple[int, d
         try:
             workspace = load_yaml(workspace_path)
         except ValueError as exc:
-            return 2, result_payload(
-                ok=False,
-                action=args.action,
-                module=args.module,
-                workspace=None,
-                errors=[str(exc)],
-            )
+            return finish(2, [str(exc)])
 
         members, errors = validate_workspace(workspace, workspace_path)
         target = next(
@@ -246,50 +250,23 @@ def apply_action(args: argparse.Namespace, workspace_path: Path) -> tuple[int, d
         if target is None:
             errors.append(f"target module is not registered: {args.module}")
         if errors:
-            return 2, result_payload(
-                ok=False,
-                action=args.action,
-                module=args.module,
-                workspace=workspace,
-                target=target,
-                errors=errors,
-            )
+            return finish(2, errors)
 
         if args.action == "status":
-            return 0, result_payload(
-                ok=True,
-                action=args.action,
-                module=args.module,
-                workspace=workspace,
-                target=target,
-            )
+            return finish()
 
         assert target is not None
         assert owner is not None
         blockers = previous_incomplete(members, target)
         if blockers:
-            return 1, result_payload(
-                ok=False,
-                action=args.action,
-                module=args.module,
-                workspace=workspace,
-                target=target,
-                errors=[f"earlier modules are not complete: {', '.join(blockers)}"],
-            )
+            return finish(1, [f"earlier modules are not complete: {', '.join(blockers)}"])
 
         active_module = workspace.get("active_module")
         active_owner = workspace.get("active_owner")
 
         if args.action == "claim":
             if target.get("status") == "complete":
-                return 1, result_payload(
-                    ok=False,
-                    action=args.action,
-                    module=args.module,
-                    workspace=workspace,
-                    target=target,
-                    errors=["a complete module cannot be claimed"],
-                )
+                return finish(1, ["a complete module cannot be claimed"])
             if active_module is None:
                 timestamp = now_iso()
                 workspace["active_module"] = args.module
@@ -300,95 +277,34 @@ def apply_action(args: argparse.Namespace, workspace_path: Path) -> tuple[int, d
                 target["last_owner"] = owner
                 workspace["next_action"] = f"继续模块 {args.module}"
                 write_yaml_atomically(workspace_path, workspace)
-                return 0, result_payload(
-                    ok=True,
-                    action=args.action,
-                    module=args.module,
-                    workspace=workspace,
-                    target=target,
-                    changed=True,
-                )
+                return finish(changed=True)
             if active_module != args.module:
-                return 1, result_payload(
-                    ok=False,
-                    action=args.action,
-                    module=args.module,
-                    workspace=workspace,
-                    target=target,
-                    errors=[f"another module is active: {active_module}"],
-                )
+                return finish(1, [f"another module is active: {active_module}"])
             if active_owner == owner:
-                return 0, result_payload(
-                    ok=True,
-                    action=args.action,
-                    module=args.module,
-                    workspace=workspace,
-                    target=target,
-                )
+                return finish()
             if not args.takeover:
-                return 1, result_payload(
-                    ok=False,
-                    action=args.action,
-                    module=args.module,
-                    workspace=workspace,
-                    target=target,
-                    errors=[f"module {args.module} is owned by another task: {active_owner}"],
-                )
+                return finish(1, [f"module {args.module} is owned by another task: {active_owner}"])
             workspace["active_owner"] = owner
             workspace["active_since"] = now_iso()
             target["last_owner"] = owner
             workspace["next_action"] = f"继续模块 {args.module}"
             write_yaml_atomically(workspace_path, workspace)
-            return 0, result_payload(
-                ok=True,
-                action=args.action,
-                module=args.module,
-                workspace=workspace,
-                target=target,
-                changed=True,
-            )
+            return finish(changed=True)
 
         if active_module != args.module:
             message = (
                 "no module is active" if active_module is None else f"another module is active: {active_module}"
             )
-            return 1, result_payload(
-                ok=False,
-                action=args.action,
-                module=args.module,
-                workspace=workspace,
-                target=target,
-                errors=[message],
-            )
+            return finish(1, [message])
         if active_owner != owner:
-            return 1, result_payload(
-                ok=False,
-                action=args.action,
-                module=args.module,
-                workspace=workspace,
-                target=target,
-                errors=[f"module {args.module} is owned by another task: {active_owner}"],
-            )
+            return finish(1, [f"module {args.module} is owned by another task: {active_owner}"])
 
         if args.action == "check":
-            return 0, result_payload(
-                ok=True,
-                action=args.action,
-                module=args.module,
-                workspace=workspace,
-                target=target,
-            )
+            return finish()
 
         state_error = check_module_state_complete(target, workspace_path)
         if state_error is not None:
-            return 1, result_payload(
-                ok=False,
-                action=args.action,
-                module=args.module,
-                workspace=workspace,
-                target=target,
-                errors=[state_error],
-            )
+            return finish(1, [state_error])
         timestamp = now_iso()
         target["status"] = "complete"
         target["completed_at"] = timestamp
@@ -400,14 +316,7 @@ def apply_action(args: argparse.Namespace, workspace_path: Path) -> tuple[int, d
             f"激活模块 {remaining}" if remaining is not None else "工作区全部模块已完成"
         )
         write_yaml_atomically(workspace_path, workspace)
-        return 0, result_payload(
-            ok=True,
-            action=args.action,
-            module=args.module,
-            workspace=workspace,
-            target=target,
-            changed=True,
-        )
+        return finish(changed=True)
 
 
 def main() -> int:

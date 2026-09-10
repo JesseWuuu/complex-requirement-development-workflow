@@ -53,12 +53,20 @@ def is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def load_yaml(path: Path) -> dict[str, Any]:
+def read_state_bytes(path: Path) -> bytes:
     try:
-        value = yaml.safe_load(path.read_text(encoding="utf-8"))
+        return path.read_bytes()
     except FileNotFoundError as exc:
         raise ValueError(f"state does not exist: {path}") from exc
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+    except OSError as exc:
+        raise ValueError(f"state cannot be read: {exc}") from exc
+
+
+def load_yaml(path: Path, *, source_bytes: bytes | None = None) -> dict[str, Any]:
+    try:
+        raw = read_state_bytes(path) if source_bytes is None else source_bytes
+        value = yaml.safe_load(raw.decode("utf-8"))
+    except (UnicodeError, yaml.YAMLError) as exc:
         raise ValueError(f"state cannot be read: {exc}") from exc
     if not isinstance(value, dict):
         raise ValueError("state must be a YAML mapping")
@@ -99,11 +107,20 @@ def add_issue(
     target.append(item)
 
 
-def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[str, Any]]:
+def validate_state(
+    state: dict[str, Any], state_path: Path, *, include_fingerprints: bool = False
+) -> tuple[int, dict[str, Any]]:
     structural: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     drift: list[dict[str, Any]] = []
     base = state_path.parent
+    file_digests: dict[str, str | None] = {}
+
+    def current_sha256(path: Path) -> str | None:
+        key = str(path)
+        if key not in file_digests:
+            file_digests[key] = file_sha256(path)
+        return file_digests[key]
 
     if state.get("schema") != "requirement-spec/v2":
         add_issue(
@@ -142,7 +159,7 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
     if prd_path is None or not is_sha256(prd_sha):
         add_issue(structural, kind="prd", phase=1, reason="PRD needs path and sha256")
     else:
-        actual = file_sha256(prd_path)
+        actual = current_sha256(prd_path)
         if actual != prd_sha:
             add_issue(
                 drift,
@@ -170,7 +187,7 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
         if path is None or not is_sha256(stored_sha) or not is_nonempty_string(role):
             add_issue(structural, kind="project_rule", phase=2, reason=f"project_rules[{index}] needs path, role, and sha256")
             continue
-        actual = file_sha256(path)
+        actual = current_sha256(path)
         if actual != stored_sha:
             add_issue(
                 drift,
@@ -223,7 +240,7 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
             if path is None or not is_sha256(stored_sha):
                 add_issue(structural, kind=name, phase=phase, reason=f"{name} needs path and sha256")
             else:
-                actual = file_sha256(path)
+                actual = current_sha256(path)
                 if actual != stored_sha:
                     add_issue(
                         drift,
@@ -316,7 +333,7 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
             add_issue(structural, kind="relevant_target", phase=2, reason=f"relevant_targets[{index}] needs path, role, and sha256")
             continue
         grounding_lines.append(f"{role.strip()} | {str(raw_path).strip()} | {str(symbol).strip()} | {stored_sha}")
-        actual = file_sha256(path)
+        actual = current_sha256(path)
         expected_output = change_by_path.get(path)
         output_is_authorized = (
             authorization_status == "granted"
@@ -363,7 +380,7 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
             if pack_path is None or not is_sha256(pack_sha):
                 add_issue(structural, kind="evidence_pack", phase=2, reason="evidence pack needs path and sha256")
             else:
-                actual = file_sha256(pack_path)
+                actual = current_sha256(pack_path)
                 if actual != pack_sha:
                     add_issue(
                         drift,
@@ -453,7 +470,7 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
         if authorization_status != "granted" or expected_plan is None or implementation_result.get("plan_fingerprint_sha256") != expected_plan:
             add_issue(errors, kind="implementation_result", phase=7, reason="implementation result is not bound to an active authorization and current plan")
         for path, change in change_by_path.items():
-            actual = file_sha256(path)
+            actual = current_sha256(path)
             expected_sha = change.get("sha256")
             if change.get("kind") == "present" and actual != expected_sha:
                 add_issue(drift, kind="implementation_change", phase=7, reason="registered output changed", path=str(path), expected=expected_sha, actual=actual or "missing")
@@ -513,6 +530,35 @@ def validate_state(state: dict[str, Any], state_path: Path) -> tuple[int, dict[s
         "drift": drift,
         "errors": [*structural, *errors],
     }
+    if include_fingerprints:
+        # Include drafts whose digest has not been recorded yet. Aggregate values
+        # above deliberately use saved inputs, never refreshed filesystem values.
+        records = [
+            prd, *project_rules, *artifact_values.values(), *relevant_targets,
+            grounding.get("evidence_pack"), *changes,
+        ]
+        for record in records:
+            if isinstance(record, dict):
+                path = resolve_path(record.get("path"), base)
+                if path is not None:
+                    current_sha256(path)
+        payload["fingerprints"] = {
+            "files": file_digests,
+            "recorded_inputs": {
+                "repo_grounding.fingerprint_sha256": computed_grounding,
+                "plan_fingerprint_sha256": expected_plan,
+                "implementation_result.output_fingerprint_sha256": computed_output,
+                "post_implementation_review.input_fingerprint_sha256": expected_post_input,
+            },
+            "review_conclusions": {
+                f"{name}.conclusion_sha256": sha256_text(review["conclusion"])
+                if is_nonempty_string(review.get("conclusion")) else None
+                for name, review in (
+                    ("consistency_review", consistency),
+                    ("post_implementation_review", post_review),
+                )
+            },
+        }
     if structural:
         return 2, payload
     if errors or drift:
@@ -556,17 +602,191 @@ def validate_review(
         add_issue(structural, kind=kind, phase=phase, reason="blocked review requires two failed attempts")
 
 
+def resume_context(state: dict[str, Any], state_path: Path) -> dict[str, Any]:
+    """Project a validated state; paths are hints, never new approval decisions."""
+    phase = state["current_phase"]
+    base = state_path.parent
+    inputs: list[dict[str, str]] = []
+    approvals: dict[str, Any] = {}
+    reviews: dict[str, Any] = {}
+
+    def reference(field: str) -> str:
+        return f"{state_path}#{field}"
+
+    def add_input(role: str, raw_path: Any) -> None:
+        try:
+            path = resolve_path(raw_path, base)
+            if path is not None and path.is_file():
+                inputs.append({"role": role, "path": str(path)})
+        except (OSError, RuntimeError, ValueError):
+            # Reopened drafts may have no usable current path yet.
+            return
+
+    def approval(record: dict[str, Any], field: str) -> dict[str, Any]:
+        return {"status": record["status"], "record_ref": reference(field)}
+
+    def review(name: str) -> None:
+        record = state[name]
+        summary = {key: record.get(key) for key in ("status", "attempt", "outcome", "reviewer_ref")}
+        if is_nonempty_string(record.get("conclusion")):
+            summary["conclusion_ref"] = reference(f"{name}.conclusion")
+        reviews[name] = summary
+
+    # Phase 6 checks rule provenance against the original requirement as well.
+    if phase <= 3 or phase == 6:
+        add_input("prd", state["inputs"]["prd"]["path"])
+    if phase <= 3:
+        approvals["direction"] = approval(state["direction"], "direction")
+
+    # Earlier approved contracts plus the current document, if it already exists.
+    for name, artifact_phase in ARTIFACT_PHASES.items():
+        if artifact_phase > phase:
+            continue
+        record = state["artifacts"][name]
+        approvals[name] = approval(record, f"artifacts.{name}")
+        if record["status"] == "not_started":
+            continue
+        if artifact_phase == phase or record["status"] == "approved" or phase >= 6:
+            add_input(name, record.get("path"))
+
+    grounding = state["repo_grounding"]
+    pack = grounding.get("evidence_pack")
+    if phase >= 2 and grounding["status"] == "current" and isinstance(pack, dict):
+        add_input("grounding_pack", pack.get("path"))
+
+    consistency = state["consistency_review"]
+    revision = consistency["revision_decision"]
+    if (phase >= 6 or revision["status"] != "not_required"
+            or is_nonempty_string(consistency.get("conclusion"))):
+        review("consistency_review")
+        approvals["revision_decision"] = {
+            **approval(revision, "consistency_review.revision_decision"),
+            "return_phase": revision.get("return_phase"),
+            "artifacts": revision.get("artifacts", []),
+        }
+
+    context: dict[str, Any] = {
+        "status": state["status"],
+        "next_action": state["next_action"],
+        "open_blockers": state["open_blockers"],
+        "inputs": inputs,
+        "approvals": approvals,
+        "reviews": reviews,
+    }
+    if state["inputs"].get("design_targets"):
+        context["design_targets_ref"] = reference("inputs.design_targets")
+    if (phase <= 3 and state["direction"]["status"] != "superseded"
+            and is_nonempty_string(state["direction"].get("summary"))):
+        context["direction_summary"] = state["direction"]["summary"]
+    workspace = state.get("workspace")
+    if isinstance(workspace, dict) and any(
+        is_nonempty_string(workspace.get(key)) for key in ("workspace_path", "module_slug")
+    ):
+        context["workspace"] = {
+            key: workspace.get(key) if is_nonempty_string(workspace.get(key)) else None
+            for key in ("workspace_path", "module_slug")
+        }
+    if phase == 7:
+        approvals["implementation_authorization"] = approval(
+            state["implementation_authorization"], "implementation_authorization"
+        )
+        review("post_implementation_review")
+        result = state["implementation_result"]
+        verification = result.get("verification", [])
+        context["implementation_result"] = {
+            "status": result["status"],
+            "changes_ref": reference("implementation_result.changes"),
+            "verification_ref": reference("implementation_result.verification"),
+            "verification_counts": {
+                outcome: sum(item["result"] == outcome for item in verification)
+                for outcome in ("passed", "failed", "blocked")
+            },
+        }
+    return context
+
+
+def context_payload(
+    payload: dict[str, Any], state: dict[str, Any], state_path: Path
+) -> dict[str, Any]:
+    """Keep diagnostics useful without echoing digests or stale execution context."""
+    result = dict(payload)
+    if payload["ok"]:
+        result["context"] = resume_context(state, state_path)
+        return result
+
+    field_by_kind = {
+        "prd": "inputs.prd",
+        "project_rule": "inputs.project_rules",
+        "project_rules": "inputs.project_rules",
+        "relevant_target": "repo_grounding.relevant_targets",
+        "relevant_targets": "repo_grounding.relevant_targets",
+        "grounding_fingerprint": "repo_grounding",
+        "evidence_pack": "repo_grounding.evidence_pack",
+        "evidence_pack_binding": "repo_grounding.evidence_pack",
+        "plan_fingerprint": "plan_fingerprint_sha256",
+        "implementation_change": "implementation_result.changes",
+        "implementation_changes": "implementation_result.changes",
+        "output_fingerprint": "implementation_result.changes",
+        "verification": "implementation_result.verification",
+        "revision_decision": "consistency_review.revision_decision",
+        "approval_order": "artifacts",
+        "workflow_complete": "status",
+    }
+    hints: list[dict[str, Any]] = []
+    for collection in ("errors", "drift"):
+        result[collection] = [
+            {key: item[key] for key in ("kind", "phase", "reason", "path") if key in item}
+            for item in payload.get(collection, [])
+        ]
+        for item in result[collection]:
+            kind = item["kind"]
+            field = field_by_kind.get(kind, kind.removesuffix("_binding"))
+            if kind in ARTIFACT_PHASES:
+                field = f"artifacts.{kind}"
+            if field.split(".", 1)[0] not in state:
+                field = ""
+            hint = {"phase": item["phase"], "record_ref": f"{state_path}#{field}"}
+            if "path" in item:
+                hint["path"] = item["path"]
+            if hint not in hints:
+                hints.append(hint)
+    result["revalidation_inputs"] = hints
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("state", type=Path, help="path to requirement-spec/v2 state.yaml")
+    parser.add_argument(
+        "--context", action="store_true",
+        help="include compact current-phase context; report only targeted hints on invalid state or drift",
+    )
+    parser.add_argument(
+        "--fingerprints", action="store_true",
+        help="report current file hashes and aggregates from recorded inputs without changing state",
+    )
     args = parser.parse_args()
     state_path = args.state.expanduser().resolve()
+    state_sha: str | None = None
+    source_bytes: bytes | None = None
     try:
-        state = load_yaml(state_path)
+        source_bytes = read_state_bytes(state_path)
+        if args.context:
+            state_sha = sha256_bytes(source_bytes)
+        state = load_yaml(state_path, source_bytes=source_bytes)
     except ValueError as exc:
-        print(json.dumps({"ok": False, "resume_mode": "targeted_revalidation", "errors": [{"kind": "state", "phase": 1, "reason": str(exc)}]}, ensure_ascii=False, indent=2))
+        reason = str(exc)
+        if args.context and source_bytes is not None and reason != "state must be a YAML mapping":
+            reason = "state cannot be parsed as UTF-8 YAML; inspect the state file"
+        payload = {"ok": False, "resume_mode": "targeted_revalidation", "errors": [{"kind": "state", "phase": 1, "reason": reason}]}
+        if args.context:
+            payload["state_sha256"] = state_sha
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 2
-    code, payload = validate_state(state, state_path)
+    code, payload = validate_state(state, state_path, include_fingerprints=args.fingerprints)
+    if args.context:
+        payload = context_payload(payload, state, state_path)
+        payload["state_sha256"] = state_sha
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
     return code
 

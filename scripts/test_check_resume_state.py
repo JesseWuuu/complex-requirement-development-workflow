@@ -6,10 +6,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
-from scripts.check_resume_state import canonical_sha256, sha256_text
+from scripts.check_resume_state import canonical_sha256, context_payload, main, sha256_bytes, sha256_text, validate_state
 
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
@@ -252,13 +253,16 @@ class ResumeStateCheckTest(unittest.TestCase):
         self.state["status"] = "complete"
         self.state["next_action"] = "汇报最终结果"
 
-    def run_check(self) -> tuple[subprocess.CompletedProcess[str], dict]:
+    def run_check(self, *args: str) -> tuple[subprocess.CompletedProcess[str], dict]:
         self.state_path.write_text(
             yaml.safe_dump(self.state, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
+        return self.invoke_check(*args)
+
+    def invoke_check(self, *args: str) -> tuple[subprocess.CompletedProcess[str], dict]:
         completed = subprocess.run(
-            [sys.executable, str(CHECKER), str(self.state_path)],
+            [sys.executable, str(CHECKER), *args, str(self.state_path)],
             capture_output=True,
             text=True,
             check=False,
@@ -565,6 +569,338 @@ class ResumeStateCheckTest(unittest.TestCase):
         self.assertEqual(2, completed.returncode)
         reasons = " ".join(item["reason"] for item in result["errors"])
         self.assertIn("migrate v1", reasons)
+
+    def test_context_is_opt_in_and_preserves_default_json(self) -> None:
+        completed, result = self.run_check()
+        self.assertEqual(0, completed.returncode)
+        self.assertEqual(
+            {"ok", "schema", "feature_slug", "current_phase", "resume_mode",
+             "earliest_candidate_phase", "drift", "errors"},
+            set(result),
+        )
+        contextual, enriched = self.invoke_check("--context")
+        self.assertEqual(completed.returncode, contextual.returncode)
+        self.assertEqual(result, {key: value for key, value in enriched.items()
+                                  if key not in {"context", "state_sha256"}})
+        self.assertEqual(sha256_bytes(self.state_path.read_bytes()), enriched["state_sha256"])
+
+    def test_fingerprints_report_bookkeeping_values_without_writing_files(self) -> None:
+        self.approve_planning()
+        self.verify_implementation()
+        self.complete_post_review()
+        self.run_check()
+        before = {
+            path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in self.root.rglob("*") if path.is_file()
+        }
+        completed, result = self.invoke_check("--context", "--fingerprints")
+        self.assertEqual(0, completed.returncode, result)
+        self.assertIn("context", result)
+        fingerprints = result["fingerprints"]
+        self.assertEqual({
+            str(path.resolve()): self.digest(path) for path in (
+                self.prd, self.rule, self.target,
+                *(self.delivery / f"{name}.md" for name in ("spec", "test", "implementation")),
+            )
+        }, fingerprints["files"])
+        self.assertEqual({
+            "repo_grounding.fingerprint_sha256": self.state["repo_grounding"]["fingerprint_sha256"],
+            "plan_fingerprint_sha256": self.state["plan_fingerprint_sha256"],
+            "implementation_result.output_fingerprint_sha256": self.state["implementation_result"]["output_fingerprint_sha256"],
+            "post_implementation_review.input_fingerprint_sha256": self.state["post_implementation_review"]["input_fingerprint_sha256"],
+        }, fingerprints["recorded_inputs"])
+        self.assertEqual({
+            f"{name}.conclusion_sha256": self.state[name]["conclusion_sha256"]
+            for name in ("consistency_review", "post_implementation_review")
+        }, fingerprints["review_conclusions"])
+        self.assertEqual(before, {
+            path: (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in self.root.rglob("*") if path.is_file()
+        })
+
+    def test_fingerprints_keep_recorded_plan_after_authorized_source_changes(self) -> None:
+        self.approve_planning()
+        baseline = self.state["repo_grounding"]["fingerprint_sha256"]
+        plan = self.state["plan_fingerprint_sha256"]
+        self.verify_implementation()
+        completed, result = self.run_check("--fingerprints")
+        self.assertEqual(0, completed.returncode, result)
+        fingerprints = result["fingerprints"]
+        self.assertNotEqual(self.state["repo_grounding"]["relevant_targets"][0]["sha256"],
+                            fingerprints["files"][str(self.target.resolve())])
+        self.assertEqual(baseline, fingerprints["recorded_inputs"]["repo_grounding.fingerprint_sha256"])
+        self.assertEqual(plan, fingerprints["recorded_inputs"]["plan_fingerprint_sha256"])
+
+    def test_fingerprints_include_first_drafts_and_unhashed_saved_conclusions(self) -> None:
+        draft = self.delivery / "spec.md"
+        pack = self.workflow / "evidence.md"
+        self.write(draft, "new draft\n")
+        self.write(pack, "new evidence\n")
+        self.state["artifacts"]["spec"].update(status="reopened", sha256=None)
+        self.state["inputs"]["prd"]["sha256"] = None
+        self.state["repo_grounding"]["evidence_pack"] = {"path": pack.name, "sha256": None}
+        self.state["consistency_review"]["conclusion"] = "A saved conclusion without its hash."
+        completed, result = self.run_check("--fingerprints")
+        self.assertEqual(2, completed.returncode, result)
+        fingerprints = result["fingerprints"]
+        for path in (self.prd, draft, pack):
+            self.assertEqual(self.digest(path), fingerprints["files"][str(path.resolve())])
+        self.assertIsNone(fingerprints["files"][str((self.delivery / "test.md").resolve())])
+        self.assertIsNone(fingerprints["recorded_inputs"]["plan_fingerprint_sha256"])
+        self.assertEqual(sha256_text(self.state["consistency_review"]["conclusion"]),
+                         fingerprints["review_conclusions"]["consistency_review.conclusion_sha256"])
+        self.assertIsNone(fingerprints["review_conclusions"]["post_implementation_review.conclusion_sha256"])
+
+    def test_context_routes_minimal_inputs_for_each_phase(self) -> None:
+        expected = {
+            1: ["prd"], 2: ["prd"], 3: ["prd", "spec"],
+            4: ["spec", "test"], 5: ["spec", "test", "implementation"],
+            6: ["prd", "spec", "test", "implementation"],
+            7: ["spec", "test", "implementation"],
+        }
+        for phase, roles in expected.items():
+            with self.subTest(phase=phase):
+                self.approve_planning()
+                if phase < 6:
+                    self.state["plan_fingerprint_sha256"] = None
+                    for name, artifact_phase in {"spec": 3, "test": 4, "implementation": 5}.items():
+                        if artifact_phase >= phase:
+                            self.state["artifacts"][name]["status"] = (
+                                "awaiting_approval" if artifact_phase == phase else "not_started"
+                            )
+                self.state["current_phase"] = phase
+                completed, result = self.run_check("--context")
+                self.assertEqual(0, completed.returncode, result)
+                context = result["context"]
+                self.assertEqual(roles, [item["role"] for item in context["inputs"]])
+                self.assertNotIn("design_targets_ref", context)
+                self.assertNotIn(str(self.target), json.dumps(context))
+                self.assertNotIn(str(self.rule), json.dumps(context))
+                if phase <= 3:
+                    self.assertEqual("superseded", context["approvals"]["direction"]["status"])
+                if phase < 6:
+                    self.assertEqual({}, context["reviews"])
+                if phase < 7:
+                    self.assertNotIn("implementation_authorization", context["approvals"])
+                else:
+                    self.assertEqual("not_granted", context["approvals"]["implementation_authorization"]["status"])
+
+    def test_context_preserves_supplemental_design_targets_as_a_compact_reference(self) -> None:
+        target_url = "https://www.figma.com/design/checkout/Checkout?node-id=42-123"
+        self.state["inputs"]["design_targets"] = [
+            {"url": target_url, "node_id": "42:123", "description": "Supplemental design"}
+        ]
+        for phase in (2, 7):
+            with self.subTest(phase=phase):
+                if phase == 7:
+                    self.approve_planning()
+                self.state["current_phase"] = phase
+                completed, result = self.run_check("--context")
+                self.assertEqual(0, completed.returncode, result)
+                context = result["context"]
+                self.assertEqual(
+                    f"{self.state_path.resolve()}#inputs.design_targets",
+                    context["design_targets_ref"],
+                )
+                self.assertNotIn("design_targets", context)
+                self.assertNotIn(target_url, completed.stdout)
+                self.assertNotIn("42:123", completed.stdout)
+                self.assertNotIn("Supplemental design", completed.stdout)
+
+    def test_context_uses_recorded_paths_and_skips_unstarted_or_missing_documents(self) -> None:
+        self.state["current_phase"] = 3
+        custom = self.root / "custom" / "contract.md"
+        self.write(custom, "existing draft")
+        artifact = self.state["artifacts"]["spec"]
+        # The state directory is docs/spec/.workflow/feature, four levels deep.
+        artifact.update(path="../../../../custom/contract.md", status="reopened")
+        completed, result = self.run_check("--context")
+        self.assertEqual(0, completed.returncode, result)
+        self.assertEqual(str(custom.resolve()), result["context"]["inputs"][1]["path"])
+        for status, remove in (("not_started", False), ("reopened", True)):
+            with self.subTest(status=status):
+                artifact["status"] = status
+                if remove:
+                    custom.unlink()
+                completed, result = self.run_check("--context")
+                self.assertEqual(0, completed.returncode, result)
+                self.assertEqual(["prd"], [item["role"] for item in result["context"]["inputs"]])
+
+    def test_context_only_includes_a_relevant_valid_grounding_pack(self) -> None:
+        pack = self.workflow / "saved-evidence.md"
+        self.write(pack, "saved technical evidence")
+        self.state["repo_grounding"]["evidence_pack"] = {
+            "path": pack.name,
+            "sha256": self.digest(pack),
+            "input_fingerprint_sha256": self.state["repo_grounding"]["fingerprint_sha256"],
+        }
+        for phase, roles in ((1, ["prd"]), (2, ["prd", "grounding_pack"])):
+            self.state["current_phase"] = phase
+            completed, result = self.run_check("--context")
+            self.assertEqual(0, completed.returncode, result)
+            self.assertEqual(roles, [item["role"] for item in result["context"]["inputs"]])
+        self.state["repo_grounding"]["status"] = "invalidated"
+        completed, result = self.run_check("--context")
+        self.assertEqual(0, completed.returncode, result)
+        self.assertEqual(["prd"], [item["role"] for item in result["context"]["inputs"]])
+
+    def test_context_preserves_pending_revision_and_terminal_review_pointers(self) -> None:
+        self.approve_planning()
+        self.pass_consistency_review()
+        review = self.state["consistency_review"]
+        conclusion = "An editorial correction requires a revision decision."
+        review.update(status="completed", outcome="findings", conclusion=conclusion,
+                      conclusion_sha256=sha256_text(conclusion))
+        review["revision_decision"].update(
+            status="awaiting_decision", return_phase=5, artifacts=["implementation"],
+            review_conclusion_sha256=review["conclusion_sha256"],
+        )
+        self.state.update(status="awaiting_approval", next_action="等待用户决定是否返修 implementation.md",
+                          open_blockers=["返修尚未授权"])
+        completed, result = self.run_check("--context")
+        self.assertEqual(0, completed.returncode, result)
+        context = result["context"]
+        self.assertEqual(self.state["next_action"], context["next_action"])
+        self.assertEqual(self.state["open_blockers"], context["open_blockers"])
+        self.assertEqual("awaiting_decision", context["approvals"]["revision_decision"]["status"])
+        self.assertEqual(["implementation"], context["approvals"]["revision_decision"]["artifacts"])
+        self.assertEqual("findings", context["reviews"]["consistency_review"]["outcome"])
+        self.assertNotIn("implementation_authorization", context["approvals"])
+        self.state = self.base_state()
+        self.approve_planning()
+        self.verify_implementation()
+        self.complete_post_review(outcome="findings")
+        completed, result = self.run_check("--context")
+        self.assertEqual(0, completed.returncode, result)
+        context = result["context"]
+        self.assertEqual({"passed": 1, "failed": 0, "blocked": 0}, context["implementation_result"]["verification_counts"])
+        self.assertEqual(f"{self.state_path.resolve()}#implementation_result.verification", context["implementation_result"]["verification_ref"])
+        self.assertEqual(f"{self.state_path.resolve()}#post_implementation_review.conclusion", context["reviews"]["post_implementation_review"]["conclusion_ref"])
+        self.assertNotIn("conclusion_sha256", json.dumps(context))
+        self.assertNotIn("fingerprint_sha256", json.dumps(context))
+
+    def test_context_suppresses_stale_actions_and_hashes_on_drift(self) -> None:
+        self.state["next_action"] = "must not suggest this stale action"
+        self.state["inputs"]["design_targets"] = [
+            {"url": "https://www.figma.com/design/checkout/Checkout?node-id=42-123"}
+        ]
+        self.write(self.target, "changed source content")
+        completed, plain = self.run_check()
+        contextual, result = self.invoke_check("--context")
+        self.assertEqual(1, contextual.returncode)
+        self.assertEqual(completed.returncode, contextual.returncode)
+        self.assertNotIn("context", result)
+        self.assertNotIn("#inputs.design_targets", contextual.stdout)
+        self.assertNotIn("figma.com", contextual.stdout)
+        self.assertNotIn(self.state["next_action"], contextual.stdout)
+        self.assertNotIn("expected", result["drift"][0])
+        self.assertNotIn("actual", result["drift"][0])
+        self.assertIn("expected", plain["drift"][0])
+        self.assertEqual([{
+            "phase": 2, "path": str(self.target.resolve()),
+            "record_ref": f"{self.state_path.resolve()}#repo_grounding.relevant_targets",
+        }], result["revalidation_inputs"])
+        self.assertNotIn("changed source content", contextual.stdout)
+
+    def test_context_preserves_revision_authorization_after_return_to_writing(self) -> None:
+        artifact_phases = {"spec": 3, "test": 4, "implementation": 5}
+        for name, phase in artifact_phases.items():
+            with self.subTest(phase=phase):
+                self.state = self.base_state()
+                self.approve_planning()
+                self.pass_consistency_review()
+                review = self.state["consistency_review"]
+                review["status"] = "invalidated"
+                review["revision_decision"].update(
+                    status="authorized", return_phase=phase, artifacts=[name],
+                    review_conclusion_sha256=review["conclusion_sha256"],
+                    decided_at="2026-09-03T11:00:00+08:00", decision_note="Revise the named document",
+                )
+                for artifact, artifact_phase in artifact_phases.items():
+                    if artifact_phase >= phase:
+                        self.state["artifacts"][artifact]["status"] = "reopened"
+                self.state.update(current_phase=phase, plan_fingerprint_sha256=None)
+                completed, result = self.run_check("--context")
+                self.assertEqual(0, completed.returncode, result)
+                context = result["context"]
+                self.assertEqual("authorized", context["approvals"]["revision_decision"]["status"])
+                self.assertEqual([name], context["approvals"]["revision_decision"]["artifacts"])
+                self.assertEqual("invalidated", context["reviews"]["consistency_review"]["status"])
+                self.assertIn("conclusion_ref", context["reviews"]["consistency_review"])
+                self.assertNotIn("implementation_authorization", context["approvals"])
+
+    def test_context_keeps_only_recorded_workspace_references(self) -> None:
+        completed, result = self.run_check("--context")
+        self.assertEqual(0, completed.returncode, result)
+        self.assertNotIn("workspace", result["context"])
+        self.state["workspace"] = {
+            "workspace_path": "../workspace.yaml", "module_slug": "module-one",
+            "runtime_history": ["must not be included"],
+        }
+        completed, result = self.run_check("--context")
+        self.assertEqual(0, completed.returncode, result)
+        self.assertEqual({"workspace_path": "../workspace.yaml", "module_slug": "module-one"},
+                         result["context"]["workspace"])
+
+    def test_context_invalid_state_retains_failure_code_without_execution_hints(self) -> None:
+        for mutation in (lambda: self.state.update(schema="requirement-spec/v1"),
+                         lambda: self.state.update(artifacts=None)):
+            with self.subTest(mutation=mutation):
+                self.state = self.base_state()
+                mutation()
+                completed, result = self.run_check("--context")
+                self.assertEqual(2, completed.returncode, result)
+                self.assertNotIn("context", result)
+                self.assertEqual(sha256_bytes(self.state_path.read_bytes()), result["state_sha256"])
+        self.write(self.state_path, "invalid: [state-content-must-not-be-echoed")
+        completed, result = self.invoke_check("--context")
+        self.assertEqual(2, completed.returncode)
+        self.assertNotIn("context", result)
+        self.assertNotIn("state-content-must-not-be-echoed", completed.stdout)
+        self.assertEqual(sha256_bytes(self.state_path.read_bytes()), result["state_sha256"])
+        self.state_path.unlink()
+        completed, result = self.invoke_check("--context")
+        self.assertEqual(2, completed.returncode)
+        self.assertIsNone(result["state_sha256"])
+
+    def test_context_projection_does_not_read_document_content(self) -> None:
+        self.approve_planning()
+        code, validated = validate_state(self.state, self.state_path)
+        self.assertEqual(0, code)
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("unexpected content read")), \
+                patch.object(Path, "read_text", side_effect=AssertionError("unexpected text read")):
+            result = context_payload(validated, self.state, self.state_path)
+        self.assertEqual(4, len(result["context"]["inputs"]))
+
+    def test_context_reads_state_bytes_once_for_parsing_and_digest(self) -> None:
+        self.run_check()
+        reads: list[Path] = []
+        original = Path.read_bytes
+
+        def read_bytes(path: Path) -> bytes:
+            reads.append(path.resolve())
+            return original(path)
+
+        with patch.object(sys, "argv", [str(CHECKER), "--context", str(self.state_path)]), \
+                patch.object(Path, "read_bytes", read_bytes), patch("builtins.print"):
+            self.assertEqual(0, main())
+        self.assertEqual(1, reads.count(self.state_path.resolve()))
+
+    def test_context_cli_never_mutates_files(self) -> None:
+        self.approve_planning()
+        self.run_check()
+
+        def snapshot() -> dict:
+            return {str(path.relative_to(self.root)): (path.read_bytes(), path.stat().st_mtime_ns)
+                    for path in self.root.rglob("*") if path.is_file()}
+
+        for drift in (False, True):
+            if drift:
+                self.write(self.target, "unregistered change")
+            before = snapshot()
+            completed, result = self.invoke_check("--context")
+            self.assertEqual(1 if drift else 0, completed.returncode, result)
+            self.assertEqual(before, snapshot())
 
 
 if __name__ == "__main__":
