@@ -10,7 +10,8 @@ workspace:
 
 inputs:
   prd:
-    path: "<spec-root>/<feature-slug>/prd.md"
+    # 对话原文在交付目录落盘；本地文件填写原路径，无需先移动。
+    path: "<canonical-prd-path>"
     sha256: null
   project_rules: []
   design_targets: []
@@ -73,6 +74,9 @@ consistency_review:
   conclusion_sha256: null
   completed_at: null
   revision_decision:
+    # 明确编辑性修正不新增返修审批；awaiting_decision 默认不能与 passed/granted 共存。
+    # 例外见跨对话续接：仅阶段 7、实施结果 in_progress、原审阅/授权/结果均绑定未变化规划且尚未开始终结审阅。
+    # 只延续不受影响的有效原授权；待决范围与下一步记入 open_blockers/next_action，不借状态标记追认授权。
     status: not_required
     return_phase: null
     artifacts: []

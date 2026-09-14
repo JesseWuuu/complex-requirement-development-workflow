@@ -437,6 +437,26 @@ def validate_state(
         revision_status = revision.get("status")
         if revision_status not in {"not_required", "awaiting_decision", "authorized", "declined", "invalidated"}:
             add_issue(structural, kind="revision_decision", phase=6, reason="revision decision status is invalid")
+        terminal_review = state.get("post_implementation_review")
+        continuing_implementation = (
+            current_phase == 7
+            and result_status == "in_progress"
+            and consistency_status == "passed"
+            and authorization_status == "granted"
+            and expected_plan is not None
+            and stored_plan == expected_plan
+            and authorization.get("plan_fingerprint_sha256") == expected_plan
+            and implementation_result.get("plan_fingerprint_sha256") == expected_plan
+            and isinstance(terminal_review, dict)
+            and terminal_review.get("status") == "not_started"
+            and terminal_review.get("attempt") == 0
+        )
+        # A pending local revision pauses its dependants, not other authorized work.
+        # Existing input, review and output checks still reject stale bindings.
+        if revision_status == "awaiting_decision" and (
+            consistency_status == "passed" or authorization_status == "granted"
+        ) and not continuing_implementation:
+            add_issue(errors, kind="revision_decision", phase=6, reason="pending revision decision permits only already-authorized, ongoing phase-seven work on the current plan before terminal review")
         if revision_status in {"awaiting_decision", "authorized", "declined"}:
             if revision.get("review_conclusion_sha256") != consistency.get("conclusion_sha256"):
                 add_issue(errors, kind="revision_decision", phase=6, reason="revision decision is not bound to the current review conclusion")

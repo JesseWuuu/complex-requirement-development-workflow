@@ -413,7 +413,7 @@ class ResumeStateCheckTest(unittest.TestCase):
         self.assertEqual(1, completed.returncode)
         self.assertIn("consistency_review_binding", {item["kind"] for item in result["errors"]})
 
-    def test_accepts_completed_phase_six_findings_awaiting_revision_decision(self) -> None:
+    def await_revision_decision(self) -> None:
         self.approve_planning()
         conclusion = "Implementation document needs one correction."
         conclusion_sha = sha256_text(conclusion)
@@ -439,9 +439,138 @@ class ResumeStateCheckTest(unittest.TestCase):
         )
         self.state["status"] = "awaiting_approval"
         self.state["next_action"] = "等待用户决定是否返修 implementation.md"
+
+    def test_accepts_completed_phase_six_findings_awaiting_revision_decision(self) -> None:
+        self.await_revision_decision()
         completed, result = self.run_check()
         self.assertEqual(0, completed.returncode)
         self.assertTrue(result["ok"])
+
+    def test_pending_revision_decision_prevents_passed_consistency_review(self) -> None:
+        self.await_revision_decision()
+        self.state["consistency_review"]["status"] = "passed"
+
+        completed, result = self.run_check()
+
+        self.assertEqual(1, completed.returncode)
+        self.assertEqual("targeted_revalidation", result["resume_mode"])
+        self.assertTrue(any(item["kind"] == "revision_decision" and item["phase"] == 6 for item in result["errors"]))
+
+    def test_pending_revision_decision_prevents_granted_implementation_authorization(self) -> None:
+        for phase, review_status in ((6, "completed"), (6, "passed"), (7, "passed")):
+            with self.subTest(phase=phase, review_status=review_status):
+                self.await_revision_decision()
+                self.state["current_phase"] = phase
+                self.state["consistency_review"]["status"] = review_status
+                self.state["implementation_authorization"].update(
+                    status="granted",
+                    plan_fingerprint_sha256=self.state["plan_fingerprint_sha256"],
+                    granted_at="2026-09-03T10:30:00+08:00",
+                    approval_note="Implement the approved plan",
+                )
+
+                completed, result = self.run_check()
+
+                self.assertEqual(1, completed.returncode)
+                self.assertEqual("targeted_revalidation", result["resume_mode"])
+                self.assertTrue(any(item["kind"] == "revision_decision" and item["phase"] == 6 for item in result["errors"]))
+
+    def await_local_revision_during_implementation(self) -> None:
+        self.state = self.base_state()
+        self.approve_planning()
+        self.authorize()
+        self.state.update(
+            current_phase=7,
+            status="in_progress",
+            next_action="继续无依赖的 I-2；I-1 等待返修决定",
+            open_blockers=["I-1 及其下游暂停，等待 implementation.md 返修决定"],
+        )
+        self.write(self.target, "authorized I-2 implementation\n")
+        self.state["implementation_result"].update(
+            status="in_progress",
+            plan_fingerprint_sha256=self.state["plan_fingerprint_sha256"],
+            changes=[{
+                "path": str(self.target), "kind": "present", "role": "I-2 owner",
+                "sha256": self.digest(self.target),
+            }],
+        )
+        self.state["consistency_review"]["revision_decision"].update(
+            status="awaiting_decision",
+            return_phase=5,
+            artifacts=["implementation"],
+            review_conclusion_sha256=self.state["consistency_review"]["conclusion_sha256"],
+        )
+
+    def test_pending_local_revision_preserves_authorized_phase_seven_resume(self) -> None:
+        self.await_local_revision_during_implementation()
+
+        completed, result = self.run_check("--context")
+
+        self.assertEqual(0, completed.returncode, result)
+        self.assertEqual("fast_path", result["resume_mode"])
+        self.assertEqual(7, result["earliest_candidate_phase"])
+        context = result["context"]
+        self.assertEqual("granted", context["approvals"]["implementation_authorization"]["status"])
+        self.assertEqual("awaiting_decision", context["approvals"]["revision_decision"]["status"])
+        self.assertEqual(self.state["open_blockers"], context["open_blockers"])
+        self.assertEqual(self.state["next_action"], context["next_action"])
+
+    def test_pending_local_revision_does_not_bypass_invalid_authorization_or_drift(self) -> None:
+        for change, expected_kind in (
+            ("authorization", "implementation_authorization"),
+            ("result_binding", "implementation_result"),
+            ("review_binding", "consistency_review_binding"),
+            ("implementation", "implementation"),
+            ("prd", "prd"),
+            ("output", "implementation_change"),
+        ):
+            with self.subTest(change=change):
+                self.await_local_revision_during_implementation()
+                if change == "authorization":
+                    self.state["implementation_authorization"]["plan_fingerprint_sha256"] = "0" * 64
+                elif change == "result_binding":
+                    self.state["implementation_result"]["plan_fingerprint_sha256"] = "0" * 64
+                elif change == "review_binding":
+                    self.state["consistency_review"]["plan_fingerprint_sha256"] = "0" * 64
+                elif change == "implementation":
+                    self.write(self.delivery / "implementation.md", "changed plan\n")
+                elif change == "prd":
+                    self.write(self.prd, "changed requirement\n")
+                else:
+                    self.write(self.target, "unregistered output\n")
+
+                completed, result = self.run_check("--context")
+
+                self.assertEqual(1, completed.returncode, result)
+                self.assertEqual("targeted_revalidation", result["resume_mode"])
+                self.assertNotIn("context", result)
+                self.assertIn(expected_kind, {item["kind"] for item in result["errors"] + result["drift"]})
+
+    def test_pending_revision_prevents_implementation_completion(self) -> None:
+        for status in ("implemented", "verified"):
+            with self.subTest(status=status):
+                self.await_local_revision_during_implementation()
+                self.verify_implementation()
+                self.state["implementation_result"]["status"] = status
+
+                completed, result = self.run_check()
+
+                self.assertEqual(1, completed.returncode, result)
+                self.assertIn("revision_decision", {item["kind"] for item in result["errors"]})
+
+    def test_pending_local_revision_cannot_resume_writes_after_terminal_review(self) -> None:
+        for status in ("in_progress", "invalidated", "not_started"):
+            with self.subTest(status=status):
+                self.await_local_revision_during_implementation()
+                self.state["post_implementation_review"].update(
+                    status=status, attempt=1, reviewer_ref="terminal-reviewer",
+                )
+
+                completed, result = self.run_check("--context")
+
+                self.assertEqual(1, completed.returncode, result)
+                self.assertNotIn("context", result)
+                self.assertIn("revision_decision", {item["kind"] for item in result["errors"]})
 
     def test_verified_result_requires_complete_manifest(self) -> None:
         self.approve_planning()

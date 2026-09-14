@@ -1,6 +1,6 @@
 # 跨对话续接
 
-首次阶段产出给出续接提示前，或预计跨对话、上下文丢失已影响连续性时，保存本地检查点。它记录恢复所需的事实；产品决策、批准与返修规则以核心 Skill 为准。
+首次阶段产出给出续接提示前，或预计跨对话、上下文丢失已影响连续性时，保存本地检查点。本文只定义字段记录与恢复操作；授权节点见主 Skill，文档返修见[文档独立审阅](document-review.md)，实施与完成边界见[实施规则](code-execution.md)。
 
 ## 检查点
 
@@ -17,7 +17,7 @@
 
 主 Agent 直接按模板编辑检查点，只修改本次变化的字段。阶段、批准、阻塞、正式输入、实施结果或审阅结果变化时更新；纯读取和校验成功不重写文件。时间使用带时区的 ISO 8601。
 
-批准记录必须来自明确的用户确认，并绑定用户实际审阅的文件版本。修订稿用 `awaiting_approval` 或 `reopened`；获得批准后再记录 `approved`、时间和说明。编辑性修订是否保留批准、哪些结论和授权失效，按核心 Skill 判断，不能仅通过刷新摘要保留旧批准。
+批准记录必须来自明确的用户确认，并绑定用户实际审阅的文件版本。修订稿用 `awaiting_approval` 或 `reopened`；获得批准后再记录 `approved`、时间和说明。明确的编辑性修正按[返修分级](document-review.md#返修分级)保留原批准说明和时间，并在对应 `approval_note` 中追加修正范围与等义依据，再更新文档摘要和规划指纹、使旧审阅失效；不记录不存在的新用户批准。实质修订不能仅刷新摘要保留旧批准。
 
 更新后运行只读校验；需要计算摘要时加 `--fingerprints`：
 
@@ -47,7 +47,7 @@ python3 <skill-dir>/scripts/check_resume_state.py --context --fingerprints <stat
 3. **补读。** `fast_path` 时按 `context.inputs` 补齐当前阶段材料；有 `design_targets_ref`、审阅结论或结果引用时按需读取。当前对话已加载的同版材料直接复用。
 4. **处理漂移。** `targeted_revalidation` 时只复核 `drift`、`errors` 与 `revalidation_inputs` 指出的目标，由主 Agent 判断影响并从最早未完成或失效阶段继续。候选阶段不是全量重跑命令。
 
-PRD 或方向变化对应阶段 1；技术依据对应阶段 2；Spec、Test、Implementation 对应阶段 3、4、5；规划或阶段 6 结论失效对应阶段 6；实施授权、结果或终结审阅未完成对应阶段 7。已授权且准确登记的实施输出不视为依据漂移，仍须核实其符合核心 Skill 的实施范围。
+PRD 或方向变化对应阶段 1；技术依据对应阶段 2；Spec、Test、Implementation 对应阶段 3、4、5；规划或阶段 6 结论失效对应阶段 6；实施授权、结果或终结审阅未完成对应阶段 7。已授权且准确登记的实施输出不视为依据漂移，仍须核实其符合[实施规则](code-execution.md)的授权范围。
 
 `继续`、任务引用和进度询问只表示恢复。没有检查点或需要从旧版迁移时，只读取足以核实的旧任务记录：明确批准、目标路径和当前文件版本均能对应，且没有更早输入变化使其失效，才迁移批准；仅有文档不能证明批准。来源可记入 `recovery.migrated_from_tasks`，不复制任务历史。
 
@@ -55,15 +55,17 @@ PRD 或方向变化对应阶段 1；技术依据对应阶段 2；Spec、Test、I
 
 两次审阅分别使用 `consistency_review` 与 `post_implementation_review`。开始时记录输入指纹、reviewer、`in_progress` 和 `attempt`；返回后记录 `outcome`、完整 `conclusion`、结论摘要与完成时间。完整结论绑定当前输入时复用；失败、丢失和复审按 [委派参考的审阅恢复](subagent-delegation.md#审阅恢复) 执行。
 
-阶段 6 的 `completed` 表示审阅已返回，待主 Agent 核实或处理返修；核实无阻塞且所需返修已处理后记为 `passed`，保留实际发现和原结论。用户随后明确授权实施，才记录 `implementation_authorization` 的 `granted`、当前规划指纹、时间与批准说明。
+阶段 6 的 `completed` 表示审阅已返回；满足[文档审阅通过条件](document-review.md#返回阶段与复审)后记为 `passed`，保留实际发现与结论。用户明确授权实施后记录 `implementation_authorization` 的 `granted`、当前规划指纹、时间与批准说明。
 
-需要返修时，在 `revision_decision` 保存 `awaiting_decision`、返回阶段、受影响文档和所绑定的结论摘要；用户决定后记录 `authorized` 或 `declined`、时间与说明。输入漂移可使审阅失效，但不会清除已保存的结论或尚待处理的返修决定；处理决定后仍须按新输入完成文档重批和复审。不能通过重置状态绕过确认。
+仅有明确编辑性修正时，`revision_decision.status` 保持 `not_required`；仍须按当前内容重新审阅。实质返修尚待决定时保存 `awaiting_decision`、返回阶段、受影响文档与结论摘要；明确授权或拒绝后记录 `authorized` 或 `declined`、时间与说明。`awaiting_decision` 默认不能与审阅 `passed` 或实施授权 `granted` 共存。输入漂移不清除尚待处理的返修决定或原结论，不通过重置状态绕过确认。
+
+仅当 `current_phase: 7`、`implementation_result.status: in_progress`，原 `passed`、`granted` 与实施结果仍绑定未变化的当前规划，且尚未开始终结审阅时，可保留原审阅和授权。此时只允许[实施规则](code-execution.md#实施中的变更分级)中不依赖待决事项且原授权仍有效的工作继续；受影响范围和下一步记入现有 `open_blockers` 与 `next_action`，无法隔离影响时扩大暂停范围。阶段号或 `in_progress` 标记不能追认授权；正式规划或依据变化仍使原授权失效。
 
 实施开始时记录 `in_progress` 及当前授权的规划指纹；`changes` 保存实际持久化产品目标，存在的目标记 `present` 与摘要，删除目标记 `removed` 与 `null`。必要实现补充在 `role` 中关联既有 `I-*` 和职责，其依据、影响与验证记入 `verification` 或引用已有工作笔记。
 
 代码完成后补齐变更清单、输出指纹、完成时间和全部批准验证项的真实结果，并设置 `output_manifest_complete: true`。`implemented` 允许验证为 `failed` 或 `blocked`，`verified` 要求全部 `passed`。两者都进入终结审阅；有效结论返回后将流程记为 `complete`，保留失败及未验证项。旧状态仅因验证问题阻塞时，核实代码已完成后按此记录并继续审阅。
 
-正式方案变化时保留已落盘输出、使旧授权和相关结果失效；完成核心 Skill 要求的返修、重批、审阅与新授权后再继续实施。结果重新绑定当前授权，重新记录新规划下的验证，旧验证不能冒充当前验证。
+正式方案变化时保留已落盘输出、使旧授权和相关结果失效；按[文档返修规则](document-review.md)完成修订、重批、复审与新授权后再继续实施。结果重新绑定当前授权，重新记录新规划下的验证，旧验证不能冒充当前验证。
 
 ## 续接句式
 

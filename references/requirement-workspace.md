@@ -25,6 +25,8 @@
 
 ## 默认路径
 
+以下展示新建交付物的默认目录；已有本地 PRD 可以留在原路径，由工作区和全部模块共同引用。
+
 ```text
 <spec-root>/
 ├── <workspace-slug>/
@@ -44,7 +46,7 @@
             └── <module-b>/state.yaml
 ```
 
-`workspace.yaml` 基于 [工作区模板](../assets/workspace.yaml)。每个模块的 `state.yaml` 基于父级状态模板，`inputs.prd` 指向工作区根部同一份原始 PRD；不得拆分或复制模块级 PRD。相对工作区路径以 `workspace.yaml` 所在目录为基准解析。
+`workspace.yaml` 基于 [工作区模板](../assets/workspace.yaml)。每个模块的 `state.yaml` 基于父级状态模板，`inputs.prd` 与工作区 `prd.path` 指向同一权威 PRD，既可以是原有本地路径，也可以是工作区根部归档路径；不得拆分或复制模块级 PRD。相对工作区路径以 `workspace.yaml` 所在目录为基准解析。
 
 ## 成员状态
 
@@ -126,7 +128,7 @@ python3 <skill-root>/scripts/assert_serial_workspace.py <workspace.yaml> \
 
 ## 创建、升级和兼容
 
-新工作区按模块依赖顺序登记成员，序号从 1 连续递增。将既有单模块工作流升级为工作区时，保留原交付目录和状态路径，把它登记为第一个成员，再登记后续模块；只有用户明确授权时才移动既有产物。
+新工作区按模块依赖顺序登记成员，序号从 1 连续递增。将既有单模块工作流升级为工作区时，保留原交付目录和状态路径，把它登记为第一个成员，再登记后续模块；只有用户明确授权时才移动既有产物。移动已绑定输入或产物后按模块续接协议核对路径、摘要及受影响的批准；不能仅刷新绑定保留已经失效的授权。
 
 旧工作区中的 `predecessor_result_sha256`、`inherited_baseline_sha256`、`exports`、`serial_assertion` 和决策账本字段不再参与门禁判断。无需为了迁移一次性改写历史文件；后续正常编辑模板或成员时可以删除这些遗留字段。旧工作区若已经有活动模块但缺少 `active_owner`，先确认原任务状态并补充或显式迁移 owner，再执行门禁。
 

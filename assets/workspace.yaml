@@ -9,7 +9,8 @@ active_owner: null
 active_since: null
 
 prd:
-  path: "<spec-root>/<workspace-slug>/prd.md"
+  # 所有模块引用同一权威输入；本地 PRD 可以留在原位置。
+  path: "<canonical-prd-path>"
 
 members: []
 # Each member uses:
