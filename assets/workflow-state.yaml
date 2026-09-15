@@ -1,18 +1,23 @@
 schema: requirement-spec/v2
-feature_slug: "<feature-slug>"
+feature_slug: "<feature-slug>" # 多模块时使用 module-slug；沿用已有有效名称。
 repo_root: "<git-root>"
+# 多模块：delivery_dir 使用 <spec-root>/<requirement-slug>/modules/<module-slug>，
+# workflow_dir 使用 <spec-root>/.workflow/<requirement-slug>/modules/<module-slug>；下方三份文档路径同步调整。
 delivery_dir: "<spec-root>/<feature-slug>"
 workflow_dir: "<spec-root>/.workflow/<feature-slug>"
 
 workspace:
+  # 仅在启用严格串行调度时填写；多模块目录本身不要求 workspace.yaml。
   workspace_path: null
   module_slug: null
 
 inputs:
   prd:
-    # 对话原文在交付目录落盘；本地文件填写原路径，无需先移动。
+    # 对话原文在总需求目录落盘；本地文件按已确认归档选择填写权威路径。
     path: "<canonical-prd-path>"
     sha256: null
+    # 可选；记录当前归档待确认问题或用户选择及必要源/目标路径，后续模块复用。
+    location_decision: null
   project_rules: []
   design_targets: []
 

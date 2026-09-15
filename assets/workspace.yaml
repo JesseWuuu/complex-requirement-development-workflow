@@ -1,4 +1,4 @@
-schema: requirement-workspace/v1
+schema: requirement-workspace/v1 # 仅严格串行调度使用；普通多模块目录不创建此文件。
 workspace_slug: "<workspace-slug>"
 repo_root: "<git-root>"
 delivery_dir: "<spec-root>/<workspace-slug>"
@@ -9,7 +9,7 @@ active_owner: null
 active_since: null
 
 prd:
-  # 所有模块引用同一权威输入；本地 PRD 可以留在原位置。
+  # 所有模块引用同一权威输入；按主 Skill 完成首次归档询问并复用已确认选择。
   path: "<canonical-prd-path>"
 
 members: []

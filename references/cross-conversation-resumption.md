@@ -4,12 +4,13 @@
 
 ## 检查点
 
-默认路径为 `<spec-root>/.workflow/<feature-slug>/state.yaml`，结构沿用 [workflow-state.yaml](../assets/workflow-state.yaml) 的 `requirement-spec/v2`，已有有效检查点无需迁移。
+单模块默认路径为 `<spec-root>/.workflow/<feature-slug>/state.yaml`；多模块使用 `<spec-root>/.workflow/<requirement-slug>/modules/<module-slug>/state.yaml`。结构沿用 [workflow-state.yaml](../assets/workflow-state.yaml) 的 `requirement-spec/v2`，已有有效检查点无需迁移。
 
 - 保存当前阶段、下一步、阻塞项、三份文档的批准与摘要、技术依据、实施授权、实施结果和两次审阅结论。
 - Spec 批准前，方向只在 `direction.summary` 保存精简摘要；批准后改为 `superseded`，不创建独立方向文件，也不回填历史批准链。
 - 证据复杂且能明显减少重复调查时，在同目录保存可选 `grounding-pack.md`；通过 `repo_grounding.evidence_pack` 记录路径、摘要和依据指纹。
-- 工作区的顺序与活动模块归 `workspace.yaml` 管理；模块检查点只记录工作区路径和模块名。
+- `inputs.prd.location_decision` 用精简文本保存当前归档待确认问题或用户已确认的选择，包含必要的源/目标路径；它不替代 `path`、摘要或产品批准。后续模块复用同一 PRD 的现有选择，不重复询问；未回复时继续记录待确认，不记为授权。`--context` 不输出此字段，涉及归档或后续模块初始化时按需读取同一 PRD 已有关联检查点中的该字段。已有检查点缺少此可选字段时，不仅为补字段重新询问或迁移。
+- 启用严格串行时，顺序与活动模块归 `workspace.yaml` 管理，模块检查点只记录工作区路径和模块名；仅按总需求组织目录时，`workspace` 字段留空。
 
 正式决策留在三份文档。检查点不保存 Agent 任务清单、替代关系、进度日志或读取历史。
 
@@ -42,7 +43,7 @@ python3 <skill-dir>/scripts/check_resume_state.py --context --fingerprints <stat
 
 ## 恢复
 
-1. **定位。** 在已知项目的用户指定、项目约定或默认 `docs/spec/` 根目录，先检查 `<代号>/` 与 `.workflow/<代号>/state.yaml`。需要搜索时用 `rg --files --hidden --no-ignore <限定目录>`。自定义路径按 `delivery_dir` 核对；工作区按 `workspace.yaml` 的成员路径定位，并按工作区协议检查或取得活动槽。只给工作区代号时，恢复唯一活动模块或顺序上首个未完成成员。无法唯一定位时只询问项目或路径，不新建同名工作流。
+1. **定位。** 在已知项目的用户指定、项目约定或默认 `docs/spec/` 根目录，单模块先检查 `<代号>/` 与 `.workflow/<代号>/state.yaml`；给出 `<总需求>/<模块>` 时，先检查 `<总需求>/modules/<模块>/` 和 `.workflow/<总需求>/modules/<模块>/state.yaml`。需要搜索时用 `rg --files --hidden --no-ignore <限定目录>`，已有自定义路径按 `delivery_dir` 核对。有 `workspace.yaml` 时按成员路径定位并检查或取得活动槽；只给工作区代号时恢复唯一活动模块或顺序上首个未完成成员。未启用串行且只给总需求名时，只有一个已开始且未完成的模块可直接恢复；存在多个候选时询问模块或路径，不从编号推断执行许可，不新建同名流程。
 2. **校验。** 读取当前 Skill、本参考与所需项目规则，运行 `check_resume_state.py --context <state.yaml>`，不默认全文读取状态。
 3. **补读。** `fast_path` 时按 `context.inputs` 补齐当前阶段材料；有 `design_targets_ref`、审阅结论或结果引用时按需读取。当前对话已加载的同版材料直接复用。
 4. **处理漂移。** `targeted_revalidation` 时只复核 `drift`、`errors` 与 `revalidation_inputs` 指出的目标，由主 Agent 判断影响并从最早未完成或失效阶段继续。候选阶段不是全量重跑命令。
@@ -69,4 +70,4 @@ PRD 或方向变化对应阶段 1；技术依据对应阶段 2；Spec、Test、I
 
 ## 续接句式
 
-首次阶段产出说明代号与交付目录，并给出 `继续 <需求代号>`；工作区模块用 `继续 <需求代号>/<模块代号>`。跨项目重名或自定义目录时补充项目、交付目录或检查点路径即可，无需提供旧 Agent 历史。
+首次阶段产出说明代号与交付目录，并给出 `继续 <需求代号>`；多模块用 `继续 <需求代号>/<模块代号>`。跨项目重名或自定义目录时补充项目、交付目录或检查点路径即可，无需提供旧 Agent 历史。
