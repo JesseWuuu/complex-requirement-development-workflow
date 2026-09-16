@@ -1,6 +1,6 @@
 ---
 name: complex-requirement-development-workflow
-description: "将已有仓库中尚需产品决策的复杂需求，依次转化为 Spec、测试与实施方案，并按确认节点推进实现；支持续接已有工作流，不用于局部修复或已明确的直接实现。"
+description: "将已有仓库中尚需产品决策的复杂需求，依次转化为 Spec、行为场景与实施方案，并按确认节点推进实现；支持续接已有工作流，不用于局部修复或已明确的直接实现。"
 ---
 
 # 复杂需求研发工作流
@@ -37,7 +37,7 @@ description: "将已有仓库中尚需产品决策的复杂需求，依次转化
 
 非上游明示的可观察行为，只有是目标成立时唯一不可避免的结果，或本次必须保留的既有外部行为，才能进入 Spec。存在两种都满足目标而结果不同的选择时，作为开放决策。并发、缓存、生命周期、账户隔离等技术风险不自动产生新产品规则或行为测试。
 
-Spec 负责产品规则；Test 按[场景准入](references/test-writing.md#场景准入)形成覆盖义务；Implementation 承接这些义务并选择最小合理变更。更新最早负责该内容的文档，下游引用，不重复定义。
+Spec 负责产品规则；Test 按[场景准入](references/test-writing.md#场景准入)，结合项目实际用 Given-When-Then 展开契约的业务情况，作为供 Implementation 使用的需求补充，不承担真实测试的执行指导或验证计划；Implementation 承接场景中的行为要求并选择最小合理变更，必要验证按项目规则与实际改动风险确定。更新最早负责该内容的文档，下游引用，不重复定义。
 
 仅给需要下游追溯的关键规则、测试和主要实施步骤使用 `R-*`、`T-*`、`I-*`；不另建平行 ID 系统。局部修订保留既有 ID，不为符合约定批量重编号。交付文档保留审阅或执行必需的决策及下述修订记录，证据笔记放在交付目录之外；删除重复描述、无关过程历史、废弃方案和空章节，表格仅用于比较。
 
@@ -72,8 +72,8 @@ Spec 负责产品规则；Test 按[场景准入](references/test-writing.md#场�
 | 1 · 方向 | 核对相关仓库规则、入口和现有行为；呈现问题、范围、期望结果、建议方向、重要替代方案和阻塞项。足以判断方向即停止扫描，详细机制留到阶段 2。 | 确认方向 |
 | 2 · 依据 | 按[技术依据核对](references/technical-grounding.md)沿真实执行路径形成契约分类与最小修改假设，并重新判断工作流适用性。 | 解决阻塞性产品决策 |
 | 3 · Spec | 按[Spec 写作](references/spec-writing.md)形成产品规则。 | 审阅 Spec |
-| 4 · Test | 复用[技术依据](references/technical-grounding.md)，补齐必要的项目逻辑，按[测试写作](references/test-writing.md)形成行为覆盖义务。 | 审阅测试文档 |
-| 5 · Implementation | 按[技术依据](references/technical-grounding.md)的阶段 5 门槛与[实施写作](references/implementation-writing.md)形成具体修改及验证目标；阶段性局部修订由同一负责人完成。 | 审阅实施文档 |
+| 4 · Test | 复用[技术依据](references/technical-grounding.md)，结合项目实际按[测试写作](references/test-writing.md)将契约展开为 GWT 行为场景。 | 审阅测试文档 |
+| 5 · Implementation | 按[技术依据](references/technical-grounding.md)的阶段 5 门槛与[实施写作](references/implementation-writing.md)形成满足场景的具体修改，按需明确必要实施门槛；阶段性局部修订由同一负责人完成。 | 审阅实施文档 |
 | 6 · 独立文档审阅 | 按[文档独立审阅与返修](references/document-review.md)核实必要性、一致性、依据和可执行性，依影响处置发现。 | 实质返修决定；通过后确认实施 |
 | 7 · 代码实施 | 按[实施、验证与终结](references/code-execution.md)实现并记录真实验证结果，随后由全新独立 Sub Agent 只读审阅。验证失败或审阅发现只报告，有效终审结论返回后结束流程。 | 仅在产品代码授权后进入 |
 
