@@ -4,19 +4,19 @@
 
 ## 检查点
 
-单模块默认路径为 `<spec-root>/.workflow/<feature-slug>/state.yaml`；多模块使用 `<spec-root>/.workflow/<requirement-slug>/modules/<module-slug>/state.yaml`。结构沿用 [workflow-state.yaml](../assets/workflow-state.yaml) 的 `requirement-spec/v2`，已有有效检查点无需迁移。
+单模块默认路径为 `<spec-root>/.workflow/<feature-slug>/state.yaml`；多模块使用 `<spec-root>/.workflow/<requirement-slug>/modules/<module-slug>/state.yaml`。新建检查点使用 [workflow-state.yaml](../assets/workflow-state.yaml) 的 `requirement-spec/v3`；旧版恢复按下方迁移规则处理，不重跑仍有效的规划阶段。
 
-- 保存当前阶段、下一步、阻塞项、三份文档的批准与摘要、技术依据、实施授权、实施结果和两次审阅结论。
+- 保存当前阶段、下一步、阻塞项、三份文档的批准与摘要、技术依据、实施授权、实施结果、阶段 6 审阅结论和阶段 7 批次用户批准。
 - Spec 批准前，方向只在 `direction.summary` 保存精简摘要；批准后改为 `superseded`，不创建独立方向文件，也不回填历史批准链。
 - 证据复杂且能明显减少重复调查时，在同目录保存可选 `grounding-pack.md`；通过 `repo_grounding.evidence_pack` 记录路径、摘要和依据指纹。
 - `inputs.prd.location_decision` 用精简文本保存当前归档待确认问题或用户已确认的选择，包含必要的源/目标路径；它不替代 `path`、摘要或产品批准。后续模块复用同一 PRD 的现有选择，不重复询问；未回复时继续记录待确认，不记为授权。`--context` 不输出此字段，涉及归档或后续模块初始化时按需读取同一 PRD 已有关联检查点中的该字段。已有检查点缺少此可选字段时，不仅为补字段重新询问或迁移。
 - 启用严格串行时，顺序与活动模块归 `workspace.yaml` 管理，模块检查点只记录工作区路径和模块名；仅按总需求组织目录时，`workspace` 字段留空。
 
-正式决策留在三份文档。检查点不保存 Agent 任务清单、替代关系、进度日志或读取历史。
+产品与技术方案留在三份文档，批次进度与用户批准保存在检查点。检查点不保存 Agent 任务清单、替代关系、进度日志或读取历史。
 
 ## 更新与校验
 
-主 Agent 直接按模板编辑检查点，只修改本次变化的字段。阶段、批准、阻塞、正式输入、实施结果或审阅结果变化时更新；纯读取和校验成功不重写文件。时间使用带时区的 ISO 8601。
+主 Agent 直接按模板编辑检查点，只修改本次变化的字段。阶段、批准、阻塞、正式输入、实施结果或审阅结果变化时更新；非最后批提交审阅前、获得批准或修订指令后、最后一批完成时及实施中断交接前均保存；纯读取和校验成功不重写文件。时间使用带时区的 ISO 8601。
 
 文档返修时，先在被修改文档内按主 Skill 的[文档修订记录](../SKILL.md#文档修订记录)完成记录，再更新摘要和规划指纹；检查点中的批准说明与返修决定不能替代文内记录。
 
@@ -34,12 +34,13 @@ python3 <skill-dir>/scripts/check_resume_state.py --context --fingerprints <stat
 | --- | --- |
 | `context` | 无漂移时的当前阶段输入、下一步、阻塞项、批准与审阅引用 |
 | `fingerprints.files` | 已登记路径的当前文件 SHA-256；缺失或不可读为 `null` |
-| `fingerprints.recorded_inputs` | 根据检查点中**已记录的摘要**计算的技术依据、规划、输出和终结审阅输入指纹；键对应状态字段 |
+| `fingerprints.recorded_inputs` | 根据检查点中**已记录的摘要**计算的技术依据、规划与累计输出指纹；键对应状态字段 |
+| `fingerprints.implementation_batches` | 按批次索引与名称返回交付规划、累计输出快照及审阅输入的指纹；历史批次使用原规划 |
 | `fingerprints.review_conclusions` | 已保存审阅结论正文的 SHA-256 |
 
 首次建档或文件变化时，按文件摘要、依据/输出指纹、规划指纹、审阅绑定的依赖顺序补齐，只重算受影响部分，最后校验。聚合值使用已记录的输入，上游字段更新后再取下游值；仅状态变化时复用未变化的摘要。计算结果不会写回文件，也不代表批准；无需另写计算脚本或读取校验器源码。
 
-技术依据聚合 PRD、适用项目规则与最小关键仓库目标；规划指纹聚合三份已批准文档与技术依据。阶段 6 结论、实施授权和实施结果都绑定该规划指纹。终结审阅还绑定实际输出和验证结果。正常实施产生的代码变化登记在 `implementation_result.changes`，保留原规划依据；不要把 `fingerprints.files` 全量覆盖到依据记录。
+技术依据聚合 PRD、适用项目规则与最小关键仓库目标；规划指纹聚合三份已批准文档与技术依据。阶段 6 结论、实施授权和实施结果都绑定该规划指纹。批次用户批准另绑定批次名称、对应步骤、交付时的累计输出与验证结果。正常实施产生的代码变化登记在 `implementation_result.changes`，保留原规划依据；不要把 `fingerprints.files` 全量覆盖到依据记录。
 
 退出码 `0` 表示结构与绑定校验通过，`1` 表示漂移或失效绑定，`2` 表示结构无效。发生漂移可以先如实保存阻塞与失效状态，再定向复核；校验失败时不能把旧批准当成当前授权。脚本不裁决用户意图、发现严重度或验证是否充分。
 
@@ -50,25 +51,61 @@ python3 <skill-dir>/scripts/check_resume_state.py --context --fingerprints <stat
 3. **补读。** `fast_path` 时按 `context.inputs` 补齐当前阶段材料；有 `design_targets_ref`、审阅结论或结果引用时按需读取。当前对话已加载的同版材料直接复用。
 4. **处理漂移。** `targeted_revalidation` 时只复核 `drift`、`errors` 与 `revalidation_inputs` 指出的目标，由主 Agent 判断影响并从最早未完成或失效阶段继续。候选阶段不是全量重跑命令。
 
-PRD 或方向变化对应阶段 1；技术依据对应阶段 2；Spec、Test、Implementation 对应阶段 3、4、5；规划或阶段 6 结论失效对应阶段 6；实施授权、结果或终结审阅未完成对应阶段 7。已授权且准确登记的实施输出不视为依据漂移，仍须核实其符合[实施规则](code-execution.md)的授权范围。
+PRD 或方向变化对应阶段 1；技术依据对应阶段 2；Spec、Test、Implementation 对应阶段 3、4、5；规划或阶段 6 结论失效对应阶段 6；实施授权、结果或非最后批用户审阅未完成对应阶段 7。已授权且准确登记的实施输出不视为依据漂移，仍须核实其符合[实施规则](code-execution.md)的授权范围。
 
 `继续`、任务引用和进度询问只表示恢复。没有检查点或需要从旧版迁移时，只读取足以核实的旧任务记录：明确批准、目标路径和当前文件版本均能对应，且没有更早输入变化使其失效，才迁移批准；仅有文档不能证明批准。来源可记入 `recovery.migrated_from_tasks`，不复制任务历史。
 
 ## 审阅与实施记录
 
-两次审阅分别使用 `consistency_review` 与 `post_implementation_review`。开始时记录输入指纹、reviewer、`in_progress` 和 `attempt`；返回后记录 `outcome`、完整 `conclusion`、结论摘要与完成时间。完整结论绑定当前输入时复用；失败、丢失和复审按 [委派参考的审阅恢复](subagent-delegation.md#审阅恢复) 执行。
+阶段 6 独立文档审阅使用 `consistency_review`。开始时记录输入指纹、reviewer、`in_progress` 和 `attempt`；返回后记录 `outcome`、完整 `conclusion`、结论摘要与完成时间。完整结论绑定当前输入时复用；失败、丢失和复审按 [委派参考的审阅恢复](subagent-delegation.md#审阅恢复) 执行。
 
 阶段 6 的 `completed` 表示审阅已返回；满足[文档审阅通过条件](document-review.md#返回阶段与复审)后记为 `passed`，保留实际发现与结论。用户明确授权实施后记录 `implementation_authorization` 的 `granted`、当前规划指纹、时间与批准说明。
 
 仅有明确编辑性修正时，`revision_decision.status` 保持 `not_required`；仍须按当前内容重新审阅。实质返修尚待决定时保存 `awaiting_decision`、返回阶段、受影响文档与结论摘要；明确授权或拒绝后记录 `authorized` 或 `declined`、时间与说明。`awaiting_decision` 默认不能与审阅 `passed` 或实施授权 `granted` 共存。输入漂移不清除尚待处理的返修决定或原结论，不通过重置状态绕过确认。
 
-仅当 `current_phase: 7`、`implementation_result.status: in_progress`，原 `passed`、`granted` 与实施结果仍绑定未变化的当前规划，且尚未开始终结审阅时，可保留原审阅和授权。此时只允许[实施规则](code-execution.md#实施中的变更分级)中不依赖待决事项且原授权仍有效的工作继续；受影响范围和下一步记入现有 `open_blockers` 与 `next_action`，无法隔离影响时扩大暂停范围。阶段号或 `in_progress` 标记不能追认授权；正式规划或依据变化仍使原授权失效。
+仅当 `current_phase: 7`、`implementation_result.status: in_progress`，原 `passed`、`granted` 与实施结果仍绑定未变化的当前规划，且当前批次仍在 `in_progress` 或 `revising` 时，可保留原审阅和授权。此时只允许[实施规则](code-execution.md#实施中的变更分级)中当前批次内不依赖待决事项且原授权仍有效的工作继续；受影响范围和下一步记入现有 `open_blockers` 与 `next_action`，无法隔离影响时扩大暂停范围。阶段号或 `in_progress` 标记不能追认授权；正式规划或依据变化仍使原授权失效。
 
 实施开始时记录 `in_progress` 及当前授权的规划指纹；`changes` 保存实际持久化产品目标，存在的目标记 `present` 与摘要，删除目标记 `removed` 与 `null`。必要实现补充在 `role` 中关联既有 `I-*` 和职责，其依据、影响与验证记入 `verification` 或引用已有工作笔记。
 
-代码完成后补齐变更清单、输出指纹、完成时间和全部批准验证项的真实结果，并设置 `output_manifest_complete: true`。`implemented` 允许验证为 `failed` 或 `blocked`，`verified` 要求全部 `passed`。两者都进入终结审阅；有效结论返回后将流程记为 `complete`，保留失败及未验证项。旧状态仅因验证问题阻塞时，核实代码已完成后按此记录并继续审阅。
+### 批次进度与批准
 
-正式方案变化时保留已落盘输出、使旧授权和相关结果失效；按[文档返修规则](document-review.md)完成修订、重批、复审与新授权后再继续实施。结果重新绑定当前授权，重新记录新规划下的验证，旧验证不能冒充当前验证。
+`implementation_result.batches` 按已批准编排顺序保存批次；无编排时只有一项。用 `name` 对应文档批次名称、`steps` 关联既有 `I-*`，不另造编号或运行时派发账本。首次进入阶段 7 前登记全部批次；只有已通过批次之后的首个未通过批次可开始，其后尚未开始的批次保持 `pending`；因返修而失效的已产出后批保留为 `invalidated`，停止写入，不伪装成未实施。
+
+每批状态及恢复动作：
+
+| 状态 | 含义与恢复动作 |
+| --- | --- |
+| `pending` | 尚未开始；前批全部通过且实施授权有效时才可开始 |
+| `in_progress` | 已获实施授权，从当前输出继续完成本批 |
+| `awaiting_review` | 非最后批已交付并停下；恢复审阅摘要，等待用户决定，不继续写入 |
+| `revising` | 用户已明确要求修正本批；指令与范围记入 `next_action`，继续修正后重新交付 |
+| `approved` | 用户已通过绑定版本；保留批准，可进入下一批 |
+| `completed` | 仅最后一批使用；实施及必要验证结果已完整记录，自动结束，无需用户批准 |
+| `invalidated` | 相关方案、输出或批准失效；核实影响并重新取得必要确认，不按旧批准推进 |
+
+每批交付时，保存当前规划到批次的 `plan_fingerprint_sha256`，同时保存 `changes`（截至本批的累计输出快照）、`output_fingerprint_sha256` 和本批 `verification`。非最后批再计算 `review_input_fingerprint_sha256` 并停下等待用户，提交后不得通过刷新快照悄悄改变审阅版本。最后一批的验证记录与整体 `implementation_result.verification` 一致，覆盖所有要求的当前验证结果和必要集成检查；早先未解决项仍须披露，不新增审阅绑定。
+
+非最后批用户通过后记录 `approved_at`、`approval_note` 与独立的 `approved_input_fingerprint_sha256`，它必须等于用户实际审阅的指纹。有失败或条件不足项时，还须在 `accepted_unresolved` 保存用户明确接受哪些遗留问题的说明；无此确认不记为 `approved`。最后一批使用 `completed`，不需要这些用户批准字段，也不把自动结束记成用户批准。
+
+`implementation_result.changes` 持续记录当前累计输出，用于与真实文件核对；批次快照记录各次交付版本。后批按方案再次修改同一文件时，只更新当前累计输出与后批快照，不把前批快照改成新文件版本。历史批次核对自身审阅及批准绑定；没有后批正在实施、修订或保留失效产出时，最新交付快照还须匹配当前累计输出。后批工作期间仍核对真实文件与当前累计清单，不能借此忽略未登记变化。
+
+修订非最后批时保留必要的反馈范围，清除当前已失效的审阅/批准绑定，修改并验证后重新提交；状态为 `revising` 本身不是用户修订指令的证据。若须返回已通过批次且影响后批，暂停并使受影响的批次状态失效，保留真实批准说明及旧快照供追溯，不直接刷新为新批准；已经产生的输出继续保存在累计清单中。
+
+最后一批完成时补齐完整变更清单、输出指纹、完成时间和全部批准验证项的当前结果，设置 `output_manifest_complete: true`，末批记为 `completed`。`implemented` 允许验证为 `failed` 或 `blocked`，`verified` 要求全部 `passed`；校验前序批次批准及最终结果后自动将流程记为 `complete`，末批不等待用户接受遗留问题。中间批次待审阅时，整体实施结果仍为 `in_progress`；顶层为 `awaiting_approval`。
+
+已有 v3 最后一批停在 `awaiting_review` 时，若实施、验证记录和前序批准均有效完整，校验器在上下文中返回 `implementation_result.auto_finish_ready: true`。核实后直接改为末批 `completed`、流程 `complete` 并报告，不补问用户、不重做实现、不伪造批准；仍在实施或存在失效输入时先处理对应问题。历史末批真实 `approved` 记录可保留，不要求改写。
+
+正式方案变化时保留已落盘输出与真实历史批准，使旧授权及受影响的结果、批次批准失效；按[文档返修规则](document-review.md)完成修订、重批、复审与新授权后再继续。不得把原批准直接绑定到新规划；已完成工作经核实可复用，不机械重做，需要用户重新确认的受影响结果重新提交。
+
+未受影响的 `approved` 批次保留原 `plan_fingerprint_sha256`、快照与审阅/批准记录。主 Agent 对照新规划复核后，在该批次的 `plan_revalidation` 记录当前 `plan_fingerprint_sha256`、原 `approved_input_fingerprint_sha256`、`checked_at` 与 `note`；说明本批契约、范围、输出及验证仍适用的具体依据。这是影响复核，不是新的用户批准，无需重批未受影响批次，也不能替代当前规划的独立审阅与实施授权。规划再次变化或原批准版本变化时必须重新复核；受影响或证据不足的批次仍标记失效并走必要确认。新提交的 `awaiting_review` 和自动收尾的 `completed` 批次必须绑定当前规划。
+
+已有 v3 批次缺少或未填写交付规划字段时，仍按当前规划校验，兼容原记录。规划变更前，应先核实原批准绑定并补存原规划指纹；变更已经发生时，从可核实的旧检查点或任务记录恢复原值，并确认其计算出的审阅指纹匹配原批准。无法证明原绑定时按失效处理，不能用新规划或复核说明追认旧批准。
+
+### 旧版检查点迁移
+
+`requirement-spec/v2` 尚未完成的流程在恢复时迁移到 v3；校验器只提示，不自动写入。阶段 1–6 保留仍有效的输入、批准和阶段 6 结论，补充空的 `batches` 即可，不因格式升级重新审批。阶段 7 根据已批准编排、实际输出及可核实的用户决定补齐批次：未完成的继续实施，非最后批已完成但无用户批准的记为待审阅；最后一批实施及验证记录完整时按自动收尾规则处理。不能从原代码授权或 `post_implementation_review` 推导前序批次通过。旧规划没有明确批次边界且仍需分段实施时，先展示恢复分段并取得用户确认，不丢弃已完成的实现；无编排的单批任务不为收尾补造分段确认。
+
+旧版已标记 `complete` 且有效的历史记录按原规则只读保留，不强制重新验收。旧 `post_implementation_review` 可作为历史资料保留，但不参与 v3 批次推进或完成门槛，不再创建新的阶段 7 独立审阅任务。
 
 ## 续接句式
 

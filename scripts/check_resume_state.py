@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -122,18 +123,27 @@ def validate_state(
             file_digests[key] = file_sha256(path)
         return file_digests[key]
 
-    if state.get("schema") != "requirement-spec/v2":
+    legacy = state.get("schema") == "requirement-spec/v2"
+    legacy_complete = legacy and state.get("status") == "complete"
+    if state.get("schema") not in {"requirement-spec/v2", "requirement-spec/v3"}:
         add_issue(
             structural,
             kind="schema",
             phase=1,
-            reason="state.schema must be 'requirement-spec/v2'; migrate v1 from current artifacts and approvals",
+            reason="state.schema must be 'requirement-spec/v3'; migrate v1 from current artifacts and approvals",
         )
 
     current_phase = state.get("current_phase")
     if not isinstance(current_phase, int) or current_phase not in range(1, 8):
         add_issue(structural, kind="current_phase", phase=1, reason="current_phase must be 1..7")
         current_phase = 1
+    if legacy and not legacy_complete:
+        add_issue(
+            errors, kind="schema_migration", phase=current_phase,
+            reason=("migrate v2 to v3 without losing current planning approvals; "
+                    "unfinished phase seven requires reconstructing batches and verifying explicit user approvals; "
+                    "old post-implementation review is not user batch approval"),
+        )
     if state.get("status") not in TOP_STATUSES:
         add_issue(structural, kind="status", phase=current_phase, reason="top-level status is invalid")
     if not is_nonempty_string(state.get("feature_slug")):
@@ -437,7 +447,6 @@ def validate_state(
         revision_status = revision.get("status")
         if revision_status not in {"not_required", "awaiting_decision", "authorized", "declined", "invalidated"}:
             add_issue(structural, kind="revision_decision", phase=6, reason="revision decision status is invalid")
-        terminal_review = state.get("post_implementation_review")
         continuing_implementation = (
             current_phase == 7
             and result_status == "in_progress"
@@ -447,16 +456,16 @@ def validate_state(
             and stored_plan == expected_plan
             and authorization.get("plan_fingerprint_sha256") == expected_plan
             and implementation_result.get("plan_fingerprint_sha256") == expected_plan
-            and isinstance(terminal_review, dict)
-            and terminal_review.get("status") == "not_started"
-            and terminal_review.get("attempt") == 0
+            and any(isinstance(batch, dict) and batch.get("status") in {"in_progress", "revising"}
+                    for batch in (implementation_result.get("batches")
+                                  if isinstance(implementation_result.get("batches"), list) else []))
         )
         # A pending local revision pauses its dependants, not other authorized work.
         # Existing input, review and output checks still reject stale bindings.
         if revision_status == "awaiting_decision" and (
             consistency_status == "passed" or authorization_status == "granted"
         ) and not continuing_implementation:
-            add_issue(errors, kind="revision_decision", phase=6, reason="pending revision decision permits only already-authorized, ongoing phase-seven work on the current plan before terminal review")
+            add_issue(errors, kind="revision_decision", phase=6, reason="pending revision decision permits only already-authorized, ongoing phase-seven work on the current plan within the current implementation batch")
         if revision_status in {"awaiting_decision", "authorized", "declined"}:
             if revision.get("review_conclusion_sha256") != consistency.get("conclusion_sha256"):
                 add_issue(errors, kind="revision_decision", phase=6, reason="revision decision is not bound to the current review conclusion")
@@ -508,35 +517,42 @@ def validate_state(
         if not is_nonempty_string(implementation_result.get("completed_at")):
             add_issue(structural, kind="implementation_result", phase=7, reason="completed implementation needs completed_at")
 
+    batch_fingerprints: list[dict[str, Any]] = []
     expected_post_input: str | None = None
-    if result_status in COMPLETED_IMPLEMENTATION_STATUSES and expected_plan is not None and is_sha256(stored_output):
-        expected_post_input = canonical_sha256(
-            {"output": stored_output, "plan": expected_plan, "verification": verification}
+    post_review: dict[str, Any] = {}
+    if legacy_complete:
+        if result_status in COMPLETED_IMPLEMENTATION_STATUSES and expected_plan is not None and is_sha256(stored_output):
+            expected_post_input = canonical_sha256(
+                {"output": stored_output, "plan": expected_plan, "verification": verification}
+            )
+
+        post_review = state.get("post_implementation_review")
+        if not isinstance(post_review, dict):
+            add_issue(structural, kind="post_implementation_review", phase=7, reason="post_implementation_review must be a mapping")
+            post_review = {}
+        post_status = post_review.get("status")
+        if post_status not in {"not_started", "in_progress", "completed", "blocked", "invalidated"}:
+            add_issue(structural, kind="post_implementation_review", phase=7, reason="post-implementation review status is invalid")
+        validate_review(
+            post_review,
+            status=post_status,
+            completed_statuses={"completed"},
+            expected_input=expected_post_input,
+            input_key="input_fingerprint_sha256",
+            kind="post_implementation_review",
+            phase=7,
+            structural=structural,
+            errors=errors,
         )
 
-    post_review = state.get("post_implementation_review")
-    if not isinstance(post_review, dict):
-        add_issue(structural, kind="post_implementation_review", phase=7, reason="post_implementation_review must be a mapping")
-        post_review = {}
-    post_status = post_review.get("status")
-    if post_status not in {"not_started", "in_progress", "completed", "blocked", "invalidated"}:
-        add_issue(structural, kind="post_implementation_review", phase=7, reason="post-implementation review status is invalid")
-    validate_review(
-        post_review,
-        status=post_status,
-        completed_statuses={"completed"},
-        expected_input=expected_post_input,
-        input_key="input_fingerprint_sha256",
-        kind="post_implementation_review",
-        phase=7,
-        structural=structural,
-        errors=errors,
-    )
-
-    if state.get("status") == "complete" and (result_status not in COMPLETED_IMPLEMENTATION_STATUSES or post_status != "completed"):
-        add_issue(errors, kind="workflow_complete", phase=7, reason="complete workflow requires completed implementation and completed terminal review; verification may contain failed or blocked checks")
-    if post_status == "completed" and state.get("status") != "complete":
-        add_issue(errors, kind="workflow_complete", phase=7, reason="completed terminal review must close the workflow")
+        if state.get("status") == "complete" and (result_status not in COMPLETED_IMPLEMENTATION_STATUSES or post_status != "completed"):
+            add_issue(errors, kind="workflow_complete", phase=7, reason="complete workflow requires completed implementation and completed terminal review; verification may contain failed or blocked checks")
+    elif not legacy:
+        batch_fingerprints = validate_batches(
+            implementation_result, expected_plan=expected_plan, computed_output=computed_output,
+            current_phase=current_phase, top_status=state.get("status"), base=base,
+            structural=structural, errors=errors,
+        )
 
     all_issues = [*structural, *errors, *drift]
     earliest = min((item["phase"] for item in all_issues), default=current_phase)
@@ -568,22 +584,184 @@ def validate_state(
                 "repo_grounding.fingerprint_sha256": computed_grounding,
                 "plan_fingerprint_sha256": expected_plan,
                 "implementation_result.output_fingerprint_sha256": computed_output,
-                "post_implementation_review.input_fingerprint_sha256": expected_post_input,
             },
             "review_conclusions": {
                 f"{name}.conclusion_sha256": sha256_text(review["conclusion"])
                 if is_nonempty_string(review.get("conclusion")) else None
                 for name, review in (
                     ("consistency_review", consistency),
-                    ("post_implementation_review", post_review),
                 )
             },
         }
+        payload["fingerprints"]["implementation_batches"] = batch_fingerprints
+        if legacy_complete:
+            payload["fingerprints"]["recorded_inputs"]["post_implementation_review.input_fingerprint_sha256"] = expected_post_input
     if structural:
         return 2, payload
     if errors or drift:
         return 1, payload
     return 0, payload
+
+
+def validate_batches(
+    result: dict[str, Any], *, expected_plan: str | None, computed_output: str | None,
+    current_phase: int, top_status: Any, base: Path,
+    structural: list[dict[str, Any]], errors: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate durable user checkpoints, never rehash historical output from disk."""
+    batches = result.get("batches")
+    fingerprints: list[dict[str, Any]] = []
+
+    def issue(kind: str, reason: str, *, malformed: bool = False) -> None:
+        add_issue(structural if malformed else errors, kind=kind, phase=7, reason=reason)
+
+    if not isinstance(batches, list):
+        issue("implementation_batches", "implementation_result.batches must be an ordered list", malformed=True)
+        return fingerprints
+    result_status = result.get("status")
+    active = result_status in {"in_progress", *COMPLETED_IMPLEMENTATION_STATUSES}
+    if active and not batches:
+        issue("implementation_batches", "started implementation needs batches from implementation.md; use one default batch without orchestration")
+    names: set[str] = set()
+    frontier_seen = False
+    delivered: list[tuple[int, dict[str, Any], str | None]] = []
+    previous_paths: set[Path] = set()
+    current_changes = result.get("changes", [])
+    current_paths = {resolve_path(item.get("path"), base) for item in current_changes if isinstance(item, dict)} if isinstance(current_changes, list) else set()
+    statuses = {"pending", "in_progress", "awaiting_review", "revising", "approved", "completed", "invalidated"}
+    for index, batch in enumerate(batches):
+        label = f"batches[{index}]"
+        if not isinstance(batch, dict):
+            issue("implementation_batches", f"{label} must be a mapping", malformed=True)
+            continue
+        name, steps, status = batch.get("name"), batch.get("steps"), batch.get("status")
+        is_last = index == len(batches) - 1
+        if not is_nonempty_string(name) or name in names:
+            issue("implementation_batches", f"{label} needs a unique implementation.md batch name", malformed=True)
+        else:
+            names.add(name)
+        if (not isinstance(steps, list) or not steps
+                or any(not isinstance(step, str) or re.fullmatch(r"I-[A-Za-z0-9_-]+", step) is None for step in steps)
+                or len(set(step for step in steps if isinstance(step, str))) != len(steps)):
+            issue("implementation_batches", f"{label}.steps needs unique I-* references", malformed=True)
+        if status not in statuses:
+            issue("implementation_batches", f"{label} has invalid status", malformed=True)
+        if result_status != "invalidated":
+            if frontier_seen and status not in {"pending", "invalidated"}:
+                issue("batch_order", f"{label} cannot start before every preceding batch has user approval")
+            if status != "approved":
+                frontier_seen = True
+        if status == "completed":
+            if not is_last:
+                issue("batch_order", f"{label} completed is reserved for the final batch; earlier batches require user approval")
+            if result_status not in COMPLETED_IMPLEMENTATION_STATUSES:
+                issue("batch_binding", f"{label} automatic completion requires completed implementation and recorded verification")
+            if any(batch.get(field) is not None for field in ("approved_at", "approval_note", "approved_input_fingerprint_sha256")):
+                issue("batch_approval", f"{label} automatic completion is not user approval; keep user approval fields null")
+        if status == "invalidated":
+            add_issue(errors, kind="batch_invalidated", phase=min(current_phase, 7),
+                      reason=f"{label} preserves stale delivery/approval evidence; revalidate the affected scope before resuming it")
+        if status in {"in_progress", "revising", "awaiting_review", "approved", "completed"} and not active:
+            issue("batch_binding", f"{label} requires active implementation; mark stale batch evidence invalidated")
+        snapshots = batch.get("changes", [])
+        lines: list[str] = []
+        paths: set[Path] = set()
+        if not isinstance(snapshots, list):
+            issue("batch_output", f"{label}.changes must be a list", malformed=True)
+            snapshots = []
+        for change in snapshots:
+            if not isinstance(change, dict):
+                issue("batch_output", f"{label} snapshot items must be mappings", malformed=True)
+                continue
+            raw_path, kind = change.get("path"), change.get("kind")
+            path, role, digest = resolve_path(raw_path, base), change.get("role"), change.get("sha256")
+            if (path is None or path in paths or kind not in {"present", "removed"}
+                    or not is_nonempty_string(role) or (kind == "present" and not is_sha256(digest))
+                    or (kind == "removed" and digest is not None)):
+                issue("batch_output", f"{label} snapshot needs unique path, valid kind, role, and sha256", malformed=True)
+                continue
+            paths.add(path)
+            lines.append(f"{kind} | {str(raw_path).strip()} | {role.strip()} | {digest or ''}")
+        output = sha256_text("\n".join(sorted(lines))) if lines else None
+        verification = batch.get("verification", [])
+        if not isinstance(verification, list):
+            issue("batch_verification", f"{label}.verification must be a list", malformed=True)
+            verification = []
+        for check in verification:
+            if (not isinstance(check, dict) or not is_nonempty_string(check.get("check"))
+                    or check.get("result") not in {"passed", "failed", "blocked"}
+                    or not is_nonempty_string(check.get("evidence"))):
+                issue("batch_verification", f"{label} verification needs check, valid result, and evidence", malformed=True)
+        # Historical approvals retain their delivered plan. Older v3 records
+        # without this field still use the current plan until explicitly backfilled.
+        delivery_plan = batch.get("plan_fingerprint_sha256")
+        if delivery_plan is None:
+            delivery_plan = expected_plan
+        elif not is_sha256(delivery_plan):
+            issue("batch_binding", f"{label}.plan_fingerprint_sha256 must be a SHA-256 or null", malformed=True)
+        review_input = canonical_sha256({
+            "plan": delivery_plan, "name": name, "steps": steps,
+            "output": output, "verification": verification,
+        }) if is_sha256(delivery_plan) and output is not None else None
+        fingerprints.append({
+            "index": index, "name": name, "output_fingerprint_sha256": output,
+            "plan_fingerprint_sha256": delivery_plan,
+            "review_input_fingerprint_sha256": review_input,
+        })
+        if status in {"awaiting_review", "completed"} and delivery_plan != expected_plan:
+            issue("batch_binding", f"{label} new delivery must be bound to the current plan")
+        if status in {"awaiting_review", "approved", "completed"}:
+            delivered.append((index, batch, output))
+            if not previous_paths.issubset(paths) or not paths.issubset(current_paths):
+                issue("batch_output", f"{label} cumulative snapshots and current changes must retain earlier output paths, including removed files")
+            previous_paths = paths
+            if not snapshots or output is None or batch.get("output_fingerprint_sha256") != output:
+                issue("batch_output", f"{label} delivery needs a non-empty cumulative snapshot and matching output fingerprint")
+            if not verification:
+                issue("batch_verification", f"{label} delivery needs recorded verification")
+            if status != "completed" and (review_input is None or batch.get("review_input_fingerprint_sha256") != review_input):
+                issue("batch_binding", f"{label} review fingerprint does not match its plan, scope, output, and verification")
+        if status == "awaiting_review" and top_status not in {"awaiting_approval", "blocked"}:
+            issue("batch_approval", f"{label} awaiting user review requires workflow awaiting_approval or blocked; do not continue writing")
+        if status == "approved":
+            if not is_nonempty_string(batch.get("approved_at")) or not is_nonempty_string(batch.get("approval_note")):
+                issue("batch_approval", f"{label} user approval needs approved_at and approval_note", malformed=True)
+            if review_input is None or batch.get("approved_input_fingerprint_sha256") != review_input:
+                issue("batch_approval", f"{label} user approval is bound to another delivered version; require renewed user review")
+            if delivery_plan != expected_plan:
+                revalidation = batch.get("plan_revalidation")
+                if (not isinstance(revalidation, dict) or expected_plan is None or review_input is None
+                        or revalidation.get("plan_fingerprint_sha256") != expected_plan
+                        or revalidation.get("approved_input_fingerprint_sha256") != review_input
+                        or not is_nonempty_string(revalidation.get("checked_at"))
+                        or not is_nonempty_string(revalidation.get("note"))):
+                    issue("batch_revalidation", f"{label} historical approval needs an unaffected-scope revalidation bound to the current plan and original approved input")
+            if not is_last and any(isinstance(check, dict) and check.get("result") in {"failed", "blocked"} for check in verification):
+                if not is_nonempty_string(batch.get("accepted_unresolved")):
+                    issue("batch_approval", f"{label} approval with failed/blocked checks requires explicit user accepted_unresolved explanation")
+    # A subsequent active batch can legitimately alter earlier files. Only the
+    # latest delivered snapshot with no later work is the current filesystem contract.
+    if delivered:
+        index, batch, output = delivered[-1]
+        later_work = any(isinstance(item, dict) and item.get("status") in {"in_progress", "revising", "invalidated"}
+                         for item in batches[index + 1:])
+        if not later_work and output != computed_output:
+            issue("batch_output", "latest delivered cumulative snapshot does not match current implementation changes; do not refresh old approval fingerprints")
+    if result_status in COMPLETED_IMPLEMENTATION_STATUSES:
+        if not batches or any(not isinstance(batch, dict) or batch.get("status") != "approved" for batch in batches[:-1]):
+            issue("implementation_batches", "completed code requires user approval of all earlier batches")
+        last = batches[-1] if batches and isinstance(batches[-1], dict) else {}
+        if last.get("status") not in {"completed", "awaiting_review", "approved"}:
+            issue("implementation_batches", "completed code needs a completed final batch (legacy awaiting_review/approved remain readable)")
+        if last.get("verification") != result.get("verification"):
+            issue("batch_verification", "final batch verification must match the final implementation verification, including required integration checks")
+    if top_status == "complete" and (
+        current_phase != 7 or result_status not in COMPLETED_IMPLEMENTATION_STATUSES or not batches
+        or any(not isinstance(batch, dict) or batch.get("status") != "approved" for batch in batches[:-1])
+        or not isinstance(batches[-1], dict) or batches[-1].get("status") not in {"completed", "approved"}
+    ):
+        issue("workflow_complete", "complete workflow requires completed implementation, approved earlier batches, and a completed final batch (legacy approved is accepted)")
+    return fingerprints
 
 
 def validate_review(
@@ -710,7 +888,8 @@ def resume_context(state: dict[str, Any], state_path: Path) -> dict[str, Any]:
         approvals["implementation_authorization"] = approval(
             state["implementation_authorization"], "implementation_authorization"
         )
-        review("post_implementation_review")
+        if state.get("schema") == "requirement-spec/v2":
+            review("post_implementation_review")
         result = state["implementation_result"]
         verification = result.get("verification", [])
         context["implementation_result"] = {
@@ -722,6 +901,33 @@ def resume_context(state: dict[str, Any], state_path: Path) -> dict[str, Any]:
                 for outcome in ("passed", "failed", "blocked")
             },
         }
+        batches = result.get("batches", [])
+        frontier = next((i for i, batch in enumerate(batches) if batch["status"] not in {"approved", "completed"}), len(batches))
+        def batch_reference(index: int) -> dict[str, Any] | None:
+            if index >= len(batches):
+                return None
+            batch = batches[index]
+            field = f"implementation_result.batches[{index}]"
+            return {"name": batch["name"], "steps": batch["steps"], "status": batch["status"],
+                    "record_ref": reference(field), "review_ref": reference(f"{field}.review_input_fingerprint_sha256"),
+                    "approval_ref": reference(f"{field}.approval_note")}
+        context["implementation_result"]["batch_progress"] = {
+            "total": len(batches), "approved": sum(batch["status"] == "approved" for batch in batches),
+            "completed": sum(batch["status"] == "completed" for batch in batches),
+            "current": batch_reference(frontier), "next": batch_reference(frontier + 1),
+        }
+        auto_finish_ready = (
+            state.get("schema") == "requirement-spec/v3" and state["status"] != "complete"
+            and result["status"] in COMPLETED_IMPLEMENTATION_STATUSES and bool(batches)
+            and all(batch["status"] == "approved" for batch in batches[:-1])
+            and batches[-1]["status"] in {"awaiting_review", "completed", "approved"}
+        )
+        context["implementation_result"]["auto_finish_ready"] = auto_finish_ready
+        if auto_finish_ready:
+            context["next_action"] = (
+                "核实最后批次实施与验证记录后自动收尾：将末批 awaiting_review 改为 completed（保留已有真实 approved），"
+                "将流程状态改为 complete；无需用户批准，按实报告验证失败或阻塞。"
+            )
     return context
 
 
@@ -751,6 +957,15 @@ def context_payload(
         "revision_decision": "consistency_review.revision_decision",
         "approval_order": "artifacts",
         "workflow_complete": "status",
+        "schema_migration": "schema",
+        "implementation_batches": "implementation_result.batches",
+        "batch_order": "implementation_result.batches",
+        "batch_invalidated": "implementation_result.batches",
+        "batch_binding": "implementation_result.batches",
+        "batch_revalidation": "implementation_result.batches",
+        "batch_approval": "implementation_result.batches",
+        "batch_output": "implementation_result.batches",
+        "batch_verification": "implementation_result.batches",
     }
     hints: list[dict[str, Any]] = []
     for collection in ("errors", "drift"):
@@ -776,7 +991,7 @@ def context_payload(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("state", type=Path, help="path to requirement-spec/v2 state.yaml")
+    parser.add_argument("state", type=Path, help="path to requirement-spec/v3 state.yaml (completed v2 records remain readable)")
     parser.add_argument(
         "--context", action="store_true",
         help="include compact current-phase context; report only targeted hints on invalid state or drift",

@@ -1,4 +1,4 @@
-schema: requirement-spec/v2
+schema: requirement-spec/v3
 feature_slug: "<feature-slug>" # 多模块时使用 module-slug；沿用已有有效名称。
 repo_root: "<git-root>"
 # 多模块：delivery_dir 使用 <spec-root>/<requirement-slug>/modules/<module-slug>，
@@ -80,7 +80,7 @@ consistency_review:
   completed_at: null
   revision_decision:
     # 明确编辑性修正不新增返修审批；awaiting_decision 默认不能与 passed/granted 共存。
-    # 例外见跨对话续接：仅阶段 7、实施结果 in_progress、原审阅/授权/结果均绑定未变化规划且尚未开始终结审阅。
+    # 例外见跨对话续接：仅阶段 7、实施结果 in_progress、原审阅/授权/结果均绑定未变化规划且当前批次仍在实施/修订。
     # 只延续不受影响的有效原授权；待决范围与下一步记入 open_blockers/next_action，不借状态标记追认授权。
     status: not_required
     return_phase: null
@@ -98,7 +98,7 @@ implementation_authorization:
 implementation_result:
   # not_started | in_progress | implemented | verified | invalidated
   # implemented：代码完成、全部验证项已记录，允许 failed/blocked；verified：所有验证项均 passed。
-  # 两者均可进入终结代码审阅；均须有完整输出清单、输出指纹、验证记录和 completed_at。
+  # 两者均须有完整输出清单、输出指纹、验证记录和 completed_at；非末批均经用户批准且末批 completed 后自动 complete。
   status: not_started
   plan_fingerprint_sha256: null
   output_manifest_complete: false
@@ -108,15 +108,27 @@ implementation_result:
   # 包含必要实现补充；role 关联 I-* 与职责，不因此改写原规划或批准指纹。
   verification: []
   # verification item: {check, result: passed | failed | blocked, evidence}
-  # 必要补充的依据、影响与验证记入 check/evidence；失败记 failed，条件不足记 blocked，不阻止终结审阅。
+  # 包含必要最终集成验证；失败记 failed，条件不足记 blocked，非末批审阅通过需用户明确接受遗留；末批如实报告后自动收尾。
   completed_at: null
-
-post_implementation_review:
-  status: not_started
-  input_fingerprint_sha256: null
-  reviewer_ref: null
-  attempt: 0
-  outcome: null
-  conclusion: null
-  conclusion_sha256: null
-  completed_at: null
+  # 按 implementation.md 中的批次标题排序；无编排时默认一个批次，name: 默认批次。
+  # 只有首个未完成批次可进入实施；非末批通过后才允许下一批，末批完成验证记录后自动收尾。
+  batches: []
+  # batch item:
+  #   name: "<实施文档批次标题；无编排用默认批次>"
+  #   steps: [I-1]
+  #   status: pending # pending | in_progress | awaiting_review | revising | approved | completed | invalidated
+  #   # completed 仅末批使用，不代表用户批准，不填写以下用户批准字段。
+  #   changes: [] # 本批提交时的累计输出快照；结构同上，历史快照不随后续批次刷新。
+  #   verification: [] # 本批验证；最后一批含必要最终集成验证，与累计 verification 一致。
+  #   plan_fingerprint_sha256: null # 本批交付时的规划指纹；历史批准保留原值，新交付绑定当前规划。
+  #   output_fingerprint_sha256: null
+  #   review_input_fingerprint_sha256: null # 非末批审阅绑定规划、name、steps、累计输出与本批验证；末批 completed 不需要。
+  #   approved_at: null
+  #   approval_note: null # 用户明确审阅结论，不能用“继续”或独立审阅替代。
+  #   approved_input_fingerprint_sha256: null # 用户批准时的审阅摘要，不随修改自动刷新。
+  #   accepted_unresolved: null # 非末批有 failed/blocked 时，记录用户明确接受的遗留及影响；末批 completed 不需要。
+  #   plan_revalidation: # 无跨规划复用时用 null；仅复用未受影响的 approved 批次时填写以下映射，不替代批准或新授权。
+  #     plan_fingerprint_sha256: "<当前规划指纹>"
+  #     approved_input_fingerprint_sha256: "<原用户批准的审阅输入指纹>"
+  #     checked_at: "<带时区的复核时间>"
+  #     note: "<对照新规划，说明本批契约、范围、输出和验证不受影响的依据>"
