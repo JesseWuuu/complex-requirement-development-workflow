@@ -1223,7 +1223,7 @@ class ResumeStateCheckTest(unittest.TestCase):
         self.assertEqual(0, completed.returncode)
         self.assertEqual(
             {"ok", "schema", "feature_slug", "current_phase", "resume_mode",
-             "earliest_candidate_phase", "drift", "errors"},
+             "earliest_candidate_phase", "drift", "errors", "schema_compatibility"},
             set(result),
         )
         contextual, enriched = self.invoke_check("--context")

@@ -175,6 +175,18 @@ class SerialWorkspaceGateTest(unittest.TestCase):
         self.assertEqual(1, completed.returncode)
         self.assertTrue(any("module state must be complete" in item for item in result["errors"]))
 
+    def test_v4_eight_phase_module_releases_existing_workspace(self) -> None:
+        self.run_gate("a", "claim", "task-a")
+        self.write_state(self.state_a, "a", "complete")
+        state = yaml.safe_load(self.state_a.read_text())
+        state.update(schema="requirement-spec/v4", current_phase=8)
+        self.state_a.write_text(yaml.safe_dump(state))
+        completed, result = self.run_gate("a", "complete", "task-a")
+        self.assertEqual(0, completed.returncode, result)
+        self.assertIsNone(self.read_workspace()["active_module"])
+        completed, result = self.run_gate("b", "claim", "task-b")
+        self.assertEqual(0, completed.returncode, result)
+
     def test_complete_releases_workspace_and_enables_next_module(self) -> None:
         self.assertEqual(0, self.run_gate("a", "claim", "task-a")[0].returncode)
         self.write_state(self.state_a, "a", "complete")

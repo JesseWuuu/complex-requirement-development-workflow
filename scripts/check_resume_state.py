@@ -16,10 +16,21 @@ import yaml
 
 
 SHA256_LENGTH = 64
-ARTIFACT_PHASES = {"spec": 3, "test": 4, "implementation": 5}
+LEGACY_ARTIFACT_PHASES = {"spec": 3, "test": 4, "implementation": 5}
+ARTIFACT_PHASES = {"spec": 3, "test": 4, "technical_design": 5, "implementation": 6}
+
 ARTIFACT_STATUSES = {"not_started", "awaiting_approval", "approved", "reopened"}
 TOP_STATUSES = {"in_progress", "awaiting_approval", "blocked", "complete", "invalidated"}
 COMPLETED_IMPLEMENTATION_STATUSES = {"implemented", "verified"}
+
+
+def artifact_phases(state: dict[str, Any]) -> dict[str, int]:
+    return ARTIFACT_PHASES if state.get("schema") == "requirement-spec/v4" else LEGACY_ARTIFACT_PHASES
+
+
+def execution_phase(state: dict[str, Any]) -> int:
+    return 8 if state.get("schema") == "requirement-spec/v4" else 7
+
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -52,6 +63,40 @@ def is_sha256(value: Any) -> bool:
 
 def is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def joint_revision_artifacts(state: dict[str, Any]) -> set[str]:
+    """Identify pending documents in an explicitly authorized joint revision."""
+    if state.get("schema") != "requirement-spec/v4" or state.get("status") != "awaiting_approval":
+        return set()
+    review = state.get("consistency_review")
+    if not isinstance(review, dict) or review.get("status") != "invalidated":
+        return set()
+    revision = review.get("revision_decision")
+    if not isinstance(revision, dict) or revision.get("status") != "authorized":
+        return set()
+    conclusion = review.get("conclusion")
+    if (not is_nonempty_string(conclusion)
+            or review.get("conclusion_sha256") != sha256_text(conclusion)
+            or revision.get("review_conclusion_sha256") != review.get("conclusion_sha256")
+            or not is_nonempty_string(revision.get("decided_at"))
+            or not is_nonempty_string(revision.get("decision_note"))):
+        return set()
+    names = revision.get("artifacts")
+    artifacts = state.get("artifacts")
+    if (not isinstance(names, list) or not isinstance(artifacts, dict)
+            or any(not isinstance(name, str) or name not in {"test", "technical_design", "implementation"}
+                   for name in names)):
+        return set()
+    pending = {name for name in names if isinstance(artifacts.get(name), dict)
+               and artifacts[name].get("status") == "awaiting_approval"}
+    if len(pending) < 2:
+        return set()
+    phase = state.get("current_phase")
+    if (not isinstance(phase, int) or isinstance(phase, bool)
+            or not min(ARTIFACT_PHASES[name] for name in pending) <= phase <= max(ARTIFACT_PHASES[name] for name in pending)):
+        return set()
+    return pending
 
 
 def read_state_bytes(path: Path) -> bytes:
@@ -111,6 +156,9 @@ def add_issue(
 def validate_state(
     state: dict[str, Any], state_path: Path, *, include_fingerprints: bool = False
 ) -> tuple[int, dict[str, Any]]:
+    phases = artifact_phases(state)
+    code_phase = execution_phase(state)
+    review_phase = code_phase - 1
     structural: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     drift: list[dict[str, Any]] = []
@@ -125,17 +173,17 @@ def validate_state(
 
     legacy = state.get("schema") == "requirement-spec/v2"
     legacy_complete = legacy and state.get("status") == "complete"
-    if state.get("schema") not in {"requirement-spec/v2", "requirement-spec/v3"}:
+    if state.get("schema") not in {"requirement-spec/v2", "requirement-spec/v3", "requirement-spec/v4"}:
         add_issue(
             structural,
             kind="schema",
             phase=1,
-            reason="state.schema must be 'requirement-spec/v3'; migrate v1 from current artifacts and approvals",
+            reason="state.schema must be v2, v3, or v4; new workflows use requirement-spec/v4; migrate v1 from current artifacts and approvals",
         )
 
     current_phase = state.get("current_phase")
-    if not isinstance(current_phase, int) or current_phase not in range(1, 8):
-        add_issue(structural, kind="current_phase", phase=1, reason="current_phase must be 1..7")
+    if not isinstance(current_phase, int) or isinstance(current_phase, bool) or current_phase not in range(1, code_phase + 1):
+        add_issue(structural, kind="current_phase", phase=1, reason=f"current_phase must be 1..{code_phase}")
         current_phase = 1
     if legacy and not legacy_complete:
         add_issue(
@@ -233,7 +281,7 @@ def validate_state(
         add_issue(structural, kind="artifacts", phase=3, reason="artifacts must be a mapping")
         artifacts = {}
     artifact_values: dict[str, dict[str, Any]] = {}
-    for name, phase in ARTIFACT_PHASES.items():
+    for name, phase in phases.items():
         artifact = artifacts.get(name)
         if not isinstance(artifact, dict):
             add_issue(structural, kind=name, phase=phase, reason=f"artifacts.{name} must be a mapping")
@@ -272,20 +320,39 @@ def validate_state(
     if artifact_values.get("implementation", {}).get("status") == "approved" and artifact_values.get("test", {}).get("status") != "approved":
         add_issue(structural, kind="approval_order", phase=4, reason="approved implementation requires approved test")
 
+    if state.get("schema") == "requirement-spec/v4":
+        ordered = list(phases)
+        joint_pending = joint_revision_artifacts(state)
+        for index, name in enumerate(ordered):
+            record = artifact_values[name]
+            active = record.get("status") in {"awaiting_approval", "approved"}
+            # Revalidation can move backwards with invalidated downstream drafts.
+            advancing = current_phase > phases[name] and state.get("status") not in {"blocked", "invalidated"}
+            if advancing and record.get("status") != "approved" and name not in joint_pending:
+                add_issue(errors, kind="approval_order", phase=phases[name],
+                          reason=f"phase advancement requires approved {name}")
+            if active:
+                for upstream in ordered[:index]:
+                    if name in joint_pending and upstream in joint_pending:
+                        continue
+                    if artifact_values[upstream].get("status") != "approved":
+                        add_issue(errors, kind="approval_order", phase=phases[upstream],
+                                  reason=f"active {name} requires approved {upstream}")
+
     implementation_result = state.get("implementation_result")
     if not isinstance(implementation_result, dict):
-        add_issue(structural, kind="implementation_result", phase=7, reason="implementation_result must be a mapping")
+        add_issue(structural, kind="implementation_result", phase=code_phase, reason="implementation_result must be a mapping")
         implementation_result = {}
     changes = implementation_result.get("changes", [])
     if not isinstance(changes, list):
-        add_issue(structural, kind="implementation_changes", phase=7, reason="implementation_result.changes must be a list")
+        add_issue(structural, kind="implementation_changes", phase=code_phase, reason="implementation_result.changes must be a list")
         changes = []
 
     change_by_path: dict[Path, dict[str, Any]] = {}
     output_lines: list[str] = []
     for index, item in enumerate(changes):
         if not isinstance(item, dict):
-            add_issue(structural, kind="implementation_change", phase=7, reason=f"changes[{index}] must be a mapping")
+            add_issue(structural, kind="implementation_change", phase=code_phase, reason=f"changes[{index}] must be a mapping")
             continue
         raw_path = item.get("path")
         path = resolve_path(raw_path, base)
@@ -293,31 +360,31 @@ def validate_state(
         role = item.get("role")
         stored_sha = item.get("sha256")
         if path is None or kind not in {"present", "removed"} or not is_nonempty_string(role):
-            add_issue(structural, kind="implementation_change", phase=7, reason=f"changes[{index}] needs path, kind, and role")
+            add_issue(structural, kind="implementation_change", phase=code_phase, reason=f"changes[{index}] needs path, kind, and role")
             continue
         if path in change_by_path:
-            add_issue(structural, kind="implementation_change", phase=7, reason=f"duplicate implementation change: {path}")
+            add_issue(structural, kind="implementation_change", phase=code_phase, reason=f"duplicate implementation change: {path}")
             continue
         if kind == "present" and not is_sha256(stored_sha):
-            add_issue(structural, kind="implementation_change", phase=7, reason=f"present change needs sha256: {path}")
+            add_issue(structural, kind="implementation_change", phase=code_phase, reason=f"present change needs sha256: {path}")
             continue
         if kind == "removed" and stored_sha is not None:
-            add_issue(structural, kind="implementation_change", phase=7, reason=f"removed change sha256 must be null: {path}")
+            add_issue(structural, kind="implementation_change", phase=code_phase, reason=f"removed change sha256 must be null: {path}")
             continue
         change_by_path[path] = item
         output_lines.append(f"{kind} | {str(raw_path).strip()} | {role.strip()} | {stored_sha or ''}")
 
     authorization = state.get("implementation_authorization")
     if not isinstance(authorization, dict):
-        add_issue(structural, kind="implementation_authorization", phase=7, reason="implementation_authorization must be a mapping")
+        add_issue(structural, kind="implementation_authorization", phase=code_phase, reason="implementation_authorization must be a mapping")
         authorization = {}
     authorization_status = authorization.get("status")
     if authorization_status not in {"not_granted", "granted", "invalidated"}:
-        add_issue(structural, kind="implementation_authorization", phase=7, reason="implementation authorization status is invalid")
+        add_issue(structural, kind="implementation_authorization", phase=code_phase, reason="implementation authorization status is invalid")
 
     result_status = implementation_result.get("status")
     if result_status not in {"not_started", "in_progress", "invalidated", *COMPLETED_IMPLEMENTATION_STATUSES}:
-        add_issue(structural, kind="implementation_result", phase=7, reason="implementation result status is invalid")
+        add_issue(structural, kind="implementation_result", phase=code_phase, reason="implementation result status is invalid")
 
     grounding = state.get("repo_grounding")
     if not isinstance(grounding, dict):
@@ -404,30 +471,28 @@ def validate_state(
                 if evidence_pack.get("input_fingerprint_sha256") != stored_grounding:
                     add_issue(errors, kind="evidence_pack_binding", phase=2, reason="grounding pack is bound to another grounding fingerprint")
 
-    approved = all(artifact_values.get(name, {}).get("status") == "approved" for name in ARTIFACT_PHASES)
+    approved = all(artifact_values.get(name, {}).get("status") == "approved" for name in phases)
     expected_plan: str | None = None
     if approved and grounding_status == "current" and is_sha256(stored_grounding):
         expected_plan = canonical_sha256(
             {
                 "grounding": stored_grounding,
-                "implementation": artifact_values["implementation"].get("sha256"),
-                "spec": artifact_values["spec"].get("sha256"),
-                "test": artifact_values["test"].get("sha256"),
+                **{name: artifact_values[name].get("sha256") for name in phases},
             }
         )
     stored_plan = state.get("plan_fingerprint_sha256")
     if expected_plan is not None and stored_plan != expected_plan:
-        add_issue(errors, kind="plan_fingerprint", phase=6, reason="plan fingerprint does not match approved artifacts and grounding", expected=expected_plan, actual=stored_plan)
+        add_issue(errors, kind="plan_fingerprint", phase=review_phase, reason="plan fingerprint does not match approved artifacts and grounding", expected=expected_plan, actual=stored_plan)
     if expected_plan is None and stored_plan is not None:
-        add_issue(errors, kind="plan_fingerprint", phase=6, reason="plan fingerprint must be null until all planning inputs are approved and current")
+        add_issue(errors, kind="plan_fingerprint", phase=review_phase, reason="plan fingerprint must be null until all planning inputs are approved and current")
 
     consistency = state.get("consistency_review")
     if not isinstance(consistency, dict):
-        add_issue(structural, kind="consistency_review", phase=6, reason="consistency_review must be a mapping")
+        add_issue(structural, kind="consistency_review", phase=review_phase, reason="consistency_review must be a mapping")
         consistency = {}
     consistency_status = consistency.get("status")
     if consistency_status not in {"not_started", "in_progress", "completed", "passed", "blocked", "invalidated"}:
-        add_issue(structural, kind="consistency_review", phase=6, reason="consistency review status is invalid")
+        add_issue(structural, kind="consistency_review", phase=review_phase, reason="consistency review status is invalid")
     validate_review(
         consistency,
         status=consistency_status,
@@ -435,20 +500,25 @@ def validate_state(
         expected_input=expected_plan,
         input_key="plan_fingerprint_sha256",
         kind="consistency_review",
-        phase=6,
+        phase=review_phase,
         structural=structural,
         errors=errors,
     )
 
+    if state.get("schema") == "requirement-spec/v4" and current_phase == code_phase and state.get("status") not in {"blocked", "invalidated"}:
+        if consistency_status != "passed":
+            add_issue(errors, kind="consistency_review", phase=review_phase,
+                      reason="implementation phase requires a passed consistency review")
+
     revision = consistency.get("revision_decision")
     if not isinstance(revision, dict):
-        add_issue(structural, kind="revision_decision", phase=6, reason="revision_decision must be a mapping")
+        add_issue(structural, kind="revision_decision", phase=review_phase, reason="revision_decision must be a mapping")
     else:
         revision_status = revision.get("status")
         if revision_status not in {"not_required", "awaiting_decision", "authorized", "declined", "invalidated"}:
-            add_issue(structural, kind="revision_decision", phase=6, reason="revision decision status is invalid")
+            add_issue(structural, kind="revision_decision", phase=review_phase, reason="revision decision status is invalid")
         continuing_implementation = (
-            current_phase == 7
+            current_phase == code_phase
             and result_status == "in_progress"
             and consistency_status == "passed"
             and authorization_status == "granted"
@@ -465,57 +535,57 @@ def validate_state(
         if revision_status == "awaiting_decision" and (
             consistency_status == "passed" or authorization_status == "granted"
         ) and not continuing_implementation:
-            add_issue(errors, kind="revision_decision", phase=6, reason="pending revision decision permits only already-authorized, ongoing phase-seven work on the current plan within the current implementation batch")
+            add_issue(errors, kind="revision_decision", phase=review_phase, reason="pending revision decision permits only already-authorized, ongoing implementation work on the current plan within the current implementation batch")
         if revision_status in {"awaiting_decision", "authorized", "declined"}:
             if revision.get("review_conclusion_sha256") != consistency.get("conclusion_sha256"):
-                add_issue(errors, kind="revision_decision", phase=6, reason="revision decision is not bound to the current review conclusion")
+                add_issue(errors, kind="revision_decision", phase=review_phase, reason="revision decision is not bound to the current review conclusion")
             if not isinstance(revision.get("artifacts"), list) or not revision.get("artifacts"):
-                add_issue(structural, kind="revision_decision", phase=6, reason="revision decision needs affected artifacts")
+                add_issue(structural, kind="revision_decision", phase=review_phase, reason="revision decision needs affected artifacts")
         if revision_status in {"authorized", "declined"} and (
             not is_nonempty_string(revision.get("decided_at"))
             or not is_nonempty_string(revision.get("decision_note"))
         ):
-            add_issue(structural, kind="revision_decision", phase=6, reason="decided revision needs time and decision_note")
+            add_issue(structural, kind="revision_decision", phase=review_phase, reason="decided revision needs time and decision_note")
 
     if authorization_status == "granted":
         if consistency_status != "passed":
-            add_issue(errors, kind="implementation_authorization", phase=7, reason="implementation authorization requires a passed consistency review")
+            add_issue(errors, kind="implementation_authorization", phase=code_phase, reason="implementation authorization requires a passed consistency review")
         if expected_plan is None or authorization.get("plan_fingerprint_sha256") != expected_plan:
-            add_issue(errors, kind="implementation_authorization", phase=7, reason="implementation authorization is bound to another plan")
+            add_issue(errors, kind="implementation_authorization", phase=code_phase, reason="implementation authorization is bound to another plan")
         if not is_nonempty_string(authorization.get("granted_at")) or not is_nonempty_string(authorization.get("approval_note")):
-            add_issue(structural, kind="implementation_authorization", phase=7, reason="granted authorization needs time and approval_note")
+            add_issue(structural, kind="implementation_authorization", phase=code_phase, reason="granted authorization needs time and approval_note")
 
     verification = implementation_result.get("verification", [])
     if not isinstance(verification, list):
-        add_issue(structural, kind="verification", phase=7, reason="implementation_result.verification must be a list")
+        add_issue(structural, kind="verification", phase=code_phase, reason="implementation_result.verification must be a list")
         verification = []
     for index, item in enumerate(verification):
         if not isinstance(item, dict) or not is_nonempty_string(item.get("check")) or item.get("result") not in {"passed", "failed", "blocked"} or not is_nonempty_string(item.get("evidence")):
-            add_issue(structural, kind="verification", phase=7, reason=f"verification[{index}] needs check, valid result, and evidence")
+            add_issue(structural, kind="verification", phase=code_phase, reason=f"verification[{index}] needs check, valid result, and evidence")
 
     computed_output = sha256_text("\n".join(sorted(output_lines))) if output_lines else None
     stored_output = implementation_result.get("output_fingerprint_sha256")
     if result_status in {"in_progress", *COMPLETED_IMPLEMENTATION_STATUSES}:
         if authorization_status != "granted" or expected_plan is None or implementation_result.get("plan_fingerprint_sha256") != expected_plan:
-            add_issue(errors, kind="implementation_result", phase=7, reason="implementation result is not bound to an active authorization and current plan")
+            add_issue(errors, kind="implementation_result", phase=code_phase, reason="implementation result is not bound to an active authorization and current plan")
         for path, change in change_by_path.items():
             actual = current_sha256(path)
             expected_sha = change.get("sha256")
             if change.get("kind") == "present" and actual != expected_sha:
-                add_issue(drift, kind="implementation_change", phase=7, reason="registered output changed", path=str(path), expected=expected_sha, actual=actual or "missing")
+                add_issue(drift, kind="implementation_change", phase=code_phase, reason="registered output changed", path=str(path), expected=expected_sha, actual=actual or "missing")
             if change.get("kind") == "removed" and actual is not None:
-                add_issue(drift, kind="implementation_change", phase=7, reason="registered removed output exists again", path=str(path), expected="missing", actual=actual)
+                add_issue(drift, kind="implementation_change", phase=code_phase, reason="registered removed output exists again", path=str(path), expected="missing", actual=actual)
     if result_status in COMPLETED_IMPLEMENTATION_STATUSES:
         if implementation_result.get("output_manifest_complete") is not True or not changes:
-            add_issue(errors, kind="implementation_result", phase=7, reason="completed implementation needs a complete non-empty change manifest")
+            add_issue(errors, kind="implementation_result", phase=code_phase, reason="completed implementation needs a complete non-empty change manifest")
         if computed_output is None or stored_output != computed_output:
-            add_issue(errors, kind="output_fingerprint", phase=7, reason="output fingerprint does not match registered changes", expected=computed_output, actual=stored_output)
+            add_issue(errors, kind="output_fingerprint", phase=code_phase, reason="output fingerprint does not match registered changes", expected=computed_output, actual=stored_output)
         if not verification:
-            add_issue(errors, kind="verification", phase=7, reason="completed implementation needs recorded verification results")
+            add_issue(errors, kind="verification", phase=code_phase, reason="completed implementation needs recorded verification results")
         if result_status == "verified" and any(item.get("result") != "passed" for item in verification if isinstance(item, dict)):
-            add_issue(errors, kind="verification", phase=7, reason="verified result requires every verification to be passed; use implemented for failed or blocked checks")
+            add_issue(errors, kind="verification", phase=code_phase, reason="verified result requires every verification to be passed; use implemented for failed or blocked checks")
         if not is_nonempty_string(implementation_result.get("completed_at")):
-            add_issue(structural, kind="implementation_result", phase=7, reason="completed implementation needs completed_at")
+            add_issue(structural, kind="implementation_result", phase=code_phase, reason="completed implementation needs completed_at")
 
     batch_fingerprints: list[dict[str, Any]] = []
     expected_post_input: str | None = None
@@ -528,11 +598,11 @@ def validate_state(
 
         post_review = state.get("post_implementation_review")
         if not isinstance(post_review, dict):
-            add_issue(structural, kind="post_implementation_review", phase=7, reason="post_implementation_review must be a mapping")
+            add_issue(structural, kind="post_implementation_review", phase=code_phase, reason="post_implementation_review must be a mapping")
             post_review = {}
         post_status = post_review.get("status")
         if post_status not in {"not_started", "in_progress", "completed", "blocked", "invalidated"}:
-            add_issue(structural, kind="post_implementation_review", phase=7, reason="post-implementation review status is invalid")
+            add_issue(structural, kind="post_implementation_review", phase=code_phase, reason="post-implementation review status is invalid")
         validate_review(
             post_review,
             status=post_status,
@@ -540,17 +610,18 @@ def validate_state(
             expected_input=expected_post_input,
             input_key="input_fingerprint_sha256",
             kind="post_implementation_review",
-            phase=7,
+            phase=code_phase,
             structural=structural,
             errors=errors,
         )
 
         if state.get("status") == "complete" and (result_status not in COMPLETED_IMPLEMENTATION_STATUSES or post_status != "completed"):
-            add_issue(errors, kind="workflow_complete", phase=7, reason="complete workflow requires completed implementation and completed terminal review; verification may contain failed or blocked checks")
+            add_issue(errors, kind="workflow_complete", phase=code_phase, reason="complete workflow requires completed implementation and completed terminal review; verification may contain failed or blocked checks")
     elif not legacy:
         batch_fingerprints = validate_batches(
             implementation_result, expected_plan=expected_plan, computed_output=computed_output,
             current_phase=current_phase, top_status=state.get("status"), base=base,
+            code_phase=code_phase,
             structural=structural, errors=errors,
         )
 
@@ -566,6 +637,13 @@ def validate_state(
         "drift": drift,
         "errors": [*structural, *errors],
     }
+    if state.get("schema") in {"requirement-spec/v2", "requirement-spec/v3"}:
+        payload["schema_compatibility"] = {
+            "phase_count": 7,
+            "new_workflow_schema": "requirement-spec/v4",
+            "mode": "historical_read_only" if state.get("status") == "complete" else "legacy_continuation",
+            "note": "Preserve old phase numbers and approval bindings; adopting the split workflow requires explicit migration and approval of technical-design.md.",
+        }
     if include_fingerprints:
         # Include drafts whose digest has not been recorded yet. Aggregate values
         # above deliberately use saved inputs, never refreshed filesystem values.
@@ -605,7 +683,7 @@ def validate_state(
 
 def validate_batches(
     result: dict[str, Any], *, expected_plan: str | None, computed_output: str | None,
-    current_phase: int, top_status: Any, base: Path,
+    current_phase: int, top_status: Any, base: Path, code_phase: int = 7,
     structural: list[dict[str, Any]], errors: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Validate durable user checkpoints, never rehash historical output from disk."""
@@ -613,7 +691,7 @@ def validate_batches(
     fingerprints: list[dict[str, Any]] = []
 
     def issue(kind: str, reason: str, *, malformed: bool = False) -> None:
-        add_issue(structural if malformed else errors, kind=kind, phase=7, reason=reason)
+        add_issue(structural if malformed else errors, kind=kind, phase=code_phase, reason=reason)
 
     if not isinstance(batches, list):
         issue("implementation_batches", "implementation_result.batches must be an ordered list", malformed=True)
@@ -756,7 +834,7 @@ def validate_batches(
         if last.get("verification") != result.get("verification"):
             issue("batch_verification", "final batch verification must match the final implementation verification, including required integration checks")
     if top_status == "complete" and (
-        current_phase != 7 or result_status not in COMPLETED_IMPLEMENTATION_STATUSES or not batches
+        current_phase != code_phase or result_status not in COMPLETED_IMPLEMENTATION_STATUSES or not batches
         or any(not isinstance(batch, dict) or batch.get("status") != "approved" for batch in batches[:-1])
         or not isinstance(batches[-1], dict) or batches[-1].get("status") not in {"completed", "approved"}
     ):
@@ -803,6 +881,8 @@ def validate_review(
 def resume_context(state: dict[str, Any], state_path: Path) -> dict[str, Any]:
     """Project a validated state; paths are hints, never new approval decisions."""
     phase = state["current_phase"]
+    code_phase = execution_phase(state)
+    review_phase = code_phase - 1
     base = state_path.parent
     inputs: list[dict[str, str]] = []
     approvals: dict[str, Any] = {}
@@ -830,21 +910,22 @@ def resume_context(state: dict[str, Any], state_path: Path) -> dict[str, Any]:
             summary["conclusion_ref"] = reference(f"{name}.conclusion")
         reviews[name] = summary
 
-    # Phase 6 checks rule provenance against the original requirement as well.
-    if phase <= 3 or phase == 6:
+    # Independent review checks rule provenance against the original requirement as well.
+    if phase <= 3 or phase == review_phase:
         add_input("prd", state["inputs"]["prd"]["path"])
     if phase <= 3:
         approvals["direction"] = approval(state["direction"], "direction")
 
     # Earlier approved contracts plus the current document, if it already exists.
-    for name, artifact_phase in ARTIFACT_PHASES.items():
-        if artifact_phase > phase:
+    joint_pending = joint_revision_artifacts(state)
+    for name, artifact_phase in artifact_phases(state).items():
+        if artifact_phase > phase and name not in joint_pending:
             continue
         record = state["artifacts"][name]
         approvals[name] = approval(record, f"artifacts.{name}")
         if record["status"] == "not_started":
             continue
-        if artifact_phase == phase or record["status"] == "approved" or phase >= 6:
+        if artifact_phase == phase or record["status"] == "approved" or phase >= review_phase or name in joint_pending:
             add_input(name, record.get("path"))
 
     grounding = state["repo_grounding"]
@@ -854,7 +935,7 @@ def resume_context(state: dict[str, Any], state_path: Path) -> dict[str, Any]:
 
     consistency = state["consistency_review"]
     revision = consistency["revision_decision"]
-    if (phase >= 6 or revision["status"] != "not_required"
+    if (phase >= review_phase or revision["status"] != "not_required"
             or is_nonempty_string(consistency.get("conclusion"))):
         review("consistency_review")
         approvals["revision_decision"] = {
@@ -884,7 +965,7 @@ def resume_context(state: dict[str, Any], state_path: Path) -> dict[str, Any]:
             key: workspace.get(key) if is_nonempty_string(workspace.get(key)) else None
             for key in ("workspace_path", "module_slug")
         }
-    if phase == 7:
+    if phase == code_phase:
         approvals["implementation_authorization"] = approval(
             state["implementation_authorization"], "implementation_authorization"
         )
@@ -917,7 +998,7 @@ def resume_context(state: dict[str, Any], state_path: Path) -> dict[str, Any]:
             "current": batch_reference(frontier), "next": batch_reference(frontier + 1),
         }
         auto_finish_ready = (
-            state.get("schema") == "requirement-spec/v3" and state["status"] != "complete"
+            state.get("schema") in {"requirement-spec/v3", "requirement-spec/v4"} and state["status"] != "complete"
             and result["status"] in COMPLETED_IMPLEMENTATION_STATUSES and bool(batches)
             and all(batch["status"] == "approved" for batch in batches[:-1])
             and batches[-1]["status"] in {"awaiting_review", "completed", "approved"}
@@ -991,7 +1072,7 @@ def context_payload(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("state", type=Path, help="path to requirement-spec/v3 state.yaml (completed v2 records remain readable)")
+    parser.add_argument("state", type=Path, help="path to requirement-spec/v4 state.yaml (v2/v3 retain their original phase and hash semantics)")
     parser.add_argument(
         "--context", action="store_true",
         help="include compact current-phase context; report only targeted hints on invalid state or drift",
